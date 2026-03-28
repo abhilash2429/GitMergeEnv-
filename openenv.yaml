@@ -1,0 +1,45 @@
+name: git_merge_env
+version: "0.1.0"
+description: >
+  A real-world RL environment where an agent resolves git merge conflicts
+  in Python source files. The agent inspects conflict blocks, proposes
+  resolutions, and is scored deterministically against ground truth.
+author: "abhilash2429"
+tags:
+  - openenv
+  - software-engineering
+  - git
+  - code-review
+  - real-world
+tasks:
+  - id: task1
+    name: "Single Conflict — Variable Rename"
+    difficulty: easy
+  - id: task2
+    name: "Three Conflicts — Class Refactor"
+    difficulty: medium
+  - id: task3
+    name: "Five Conflicts — Architectural Migration"
+    difficulty: hard
+action_schema:
+  action_type:
+    type: string
+    enum: ["inspect", "resolve", "submit"]
+    required: true
+  conflict_id:
+    type: integer
+    required: false
+    description: "0-indexed conflict block ID. Required for inspect and resolve."
+  resolution:
+    type: string
+    required: false
+    description: "The resolved content for the conflict block. Required for resolve."
+observation_schema:
+  file_name: string
+  total_conflicts: integer
+  resolved_conflicts: integer
+  unresolved_conflict_ids: array
+  current_file_preview: string
+  last_action_feedback: string
+  last_reward: float
+  steps_remaining: integer
