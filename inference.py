@@ -6,31 +6,67 @@ Runs a GPT model as an agent against all 3 tasks.
 Uses the OpenAI API client with the environment's HTTP API.
 
 Usage:
-    export HF_TOKEN=your_huggingface_token
-    export API_BASE_URL=https://router.huggingface.co/v1
-    export MODEL_NAME=nvidia/llama-3.1-nemotron-70b-instruct
+    export INFERENCE_PROVIDER=groq
+    export GROQ_API_KEY=your_groq_api_key
+    export API_BASE_URL=https://api.groq.com/openai/v1
+    export MODEL_NAME=moonshotai/kimi-k2-instruct
     export BASE_URL=http://localhost:7860   # or your HF Space URL
     python inference.py
 
 Environment variables:
-    HF_TOKEN         — preferred
-    API_KEY          — fallback
-    API_BASE_URL     — inference API URL
+    INFERENCE_PROVIDER — "groq", "nvidia" or "huggingface"
+    GROQ_API_KEY     — Groq API key
+    NVIDIA_API_KEY   — NVIDIA NIM API key
+    HF_TOKEN         — Hugging Face token
+    API_KEY          — Hugging Face fallback
+    API_BASE_URL     — OpenAI-compatible inference API URL
     MODEL_NAME       — model to use
     BASE_URL         — environment URL (default: http://localhost:7860)
 """
 
+import _thread
 import json
 import os
+import re
 import signal
+import threading
 
 import httpx
+from dotenv import load_dotenv
 from openai import OpenAI
 
+load_dotenv()
+
 BASE_URL = os.getenv("BASE_URL", "http://localhost:7860")
-API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
-API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
-MODEL_NAME = os.getenv("MODEL_NAME", "nvidia/llama-3.1-nemotron-70b-instruct")
+INFERENCE_PROVIDER = os.getenv("INFERENCE_PROVIDER", "huggingface").lower()
+
+if INFERENCE_PROVIDER == "nvidia":
+    API_BASE_URL = os.getenv("API_BASE_URL", "https://integrate.api.nvidia.com/v1")
+    API_KEY = os.getenv("NVIDIA_API_KEY")
+    MODEL_NAME = os.getenv("MODEL_NAME", "meta/llama-3.3-70b-instruct")
+    if not API_KEY:
+        raise ValueError("NVIDIA_API_KEY must be set when INFERENCE_PROVIDER=nvidia")
+
+elif INFERENCE_PROVIDER == "groq":
+    API_BASE_URL = os.getenv("API_BASE_URL", "https://api.groq.com/openai/v1")
+    API_KEY = os.getenv("GROQ_API_KEY")
+    MODEL_NAME = os.getenv("MODEL_NAME", "moonshotai/kimi-k2-instruct")
+    if not API_KEY:
+        raise ValueError("GROQ_API_KEY must be set when INFERENCE_PROVIDER=groq")
+
+else:
+    # Default: huggingface  used for submission
+    INFERENCE_PROVIDER = "huggingface"
+    API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
+    API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
+    MODEL_NAME = os.getenv("MODEL_NAME", "meta-llama/Llama-3.3-70B-Instruct")
+    if not API_KEY:
+        raise ValueError("HF_TOKEN must be set when INFERENCE_PROVIDER=huggingface")
+
+print(f"[inference] Provider: {INFERENCE_PROVIDER}")
+print(f"[inference] Base URL: {API_BASE_URL}")
+print(f"[inference] Model: {MODEL_NAME}")
+
 MAX_STEPS_OVERRIDE = 20  # safety cap
 
 client = OpenAI(
@@ -81,6 +117,107 @@ def call_env(endpoint: str, method: str = "POST", body: dict = None) -> dict:
     return response.json()
 
 
+def create_nvidia_chat_completion(messages: list[dict]) -> str:
+    """Call the NVIDIA NIM chat completions endpoint via the OpenAI client."""
+    completion = client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=messages,
+        temperature=0.2,
+        top_p=0.7,
+        max_tokens=1024,
+        stream=True,
+    )
+
+    chunks: list[str] = []
+    for chunk in completion:
+        if chunk.choices and chunk.choices[0].delta.content is not None:
+            chunks.append(chunk.choices[0].delta.content)
+
+    return "".join(chunks)
+
+
+def _normalize_action_text(raw_response: str) -> str:
+    """Strip reasoning and markdown wrappers from model output."""
+    action_str = raw_response or ""
+
+    if "<think>" in action_str:
+        action_str = re.sub(r"<think>.*?</think>", "", action_str, flags=re.DOTALL).strip()
+
+    if "```" in action_str:
+        parts = action_str.split("```")
+        if len(parts) > 1:
+            action_str = parts[1]
+            if action_str.startswith("json"):
+                action_str = action_str[4:]
+
+    return action_str.strip()
+
+
+def _extract_resolution_value(action_str: str) -> str | None:
+    """Best-effort extraction of a multiline resolution payload."""
+    match = re.search(r'["\']resolution["\']\s*:\s*', action_str)
+    if not match:
+        return None
+
+    value = action_str[match.end():].strip()
+    if value.endswith("}"):
+        value = value[:-1].rstrip()
+    if value.endswith(","):
+        value = value[:-1].rstrip()
+
+    if value.startswith('"""') or value.startswith("'''"):
+        quote = value[:3]
+        return value[3:-3] if value.endswith(quote) else value[3:]
+
+    if value.startswith('"') or value.startswith("'"):
+        quote = value[0]
+        value = value[1:-1] if value.endswith(quote) else value[1:]
+        value = value.replace(r"\r\n", "\n")
+        value = value.replace(r"\n", "\n")
+        value = value.replace(r"\t", "\t")
+        value = value.replace(r"\"", '"')
+        value = value.replace(r"\'", "'")
+        value = value.replace(r"\\", "\\")
+        return value
+
+    return value
+
+
+def _parse_action(raw_response: str) -> dict | None:
+    """Parse a model action, including malformed JSON with multiline code."""
+    action_str = _normalize_action_text(raw_response)
+
+    try:
+        return json.loads(action_str)
+    except json.JSONDecodeError:
+        pass
+
+    start = action_str.find("{")
+    end = action_str.rfind("}")
+    if start != -1 and end > start:
+        candidate = action_str[start : end + 1]
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            action_str = candidate
+
+    action: dict = {}
+
+    action_type_match = re.search(r'["\']action_type["\']\s*:\s*["\']([^"\']+)["\']', action_str)
+    if action_type_match:
+        action["action_type"] = action_type_match.group(1)
+
+    conflict_id_match = re.search(r'["\']conflict_id["\']\s*:\s*(-?\d+)', action_str)
+    if conflict_id_match:
+        action["conflict_id"] = int(conflict_id_match.group(1))
+
+    resolution = _extract_resolution_value(action_str)
+    if resolution is not None:
+        action["resolution"] = resolution
+
+    return action or None
+
+
 def run_task(client: OpenAI, task_id: str) -> float:
     """
     Run one complete episode for a given task.
@@ -92,6 +229,12 @@ def run_task(client: OpenAI, task_id: str) -> float:
 
     obs = call_env(f"/reset?task_id={task_id}")
     print(f"Task started. File: {obs['file_name']}, Conflicts: {obs['total_conflicts']}")
+
+    if obs["total_conflicts"] <= 0:
+        raise RuntimeError(
+            f"Environment reset returned no conflicts for {task_id}. "
+            f"Feedback: {obs.get('last_action_feedback', '')}"
+        )
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -110,33 +253,23 @@ def run_task(client: OpenAI, task_id: str) -> float:
     final_score = 0.0
 
     for step_num in range(MAX_STEPS_OVERRIDE):
-        completion = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=messages,
-            temperature=0.2,
-            top_p=0.7,
-            max_tokens=1024,
-            stream=True,
-        )
+        if INFERENCE_PROVIDER == "nvidia":
+            raw_response = create_nvidia_chat_completion(messages)
+        else:
+            completion = client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=messages,
+                temperature=0.2,
+                top_p=0.7,
+                max_tokens=1024,
+            )
 
-        raw_response_parts = []
-        for chunk in completion:
-            if chunk.choices and chunk.choices[0].delta.content is not None:
-                raw_response_parts.append(chunk.choices[0].delta.content)
+            raw_response = completion.choices[0].message.content or ""
 
-        raw_response = "".join(raw_response_parts).strip()
-
-        action_str = raw_response
-        if "```" in action_str:
-            action_str = action_str.split("```")[1]
-            if action_str.startswith("json"):
-                action_str = action_str[4:]
-            action_str = action_str.strip()
-
-        try:
-            action = json.loads(action_str)
-        except json.JSONDecodeError:
-            print(f"Step {step_num}: LLM returned invalid JSON: {raw_response[:100]}")
+        action = _parse_action(raw_response)
+        if action is None:
+            action_preview = _normalize_action_text(raw_response)
+            print(f"Step {step_num}: LLM returned invalid JSON: {action_preview[:100]}")
             action = {"action_type": "inspect", "conflict_id": 0}
 
         print(
@@ -148,6 +281,16 @@ def run_task(client: OpenAI, task_id: str) -> float:
         obs = result["observation"]
         reward = result["reward"]["value"]
         done = result["done"]
+
+        if (
+            obs.get("file_name") == "unknown"
+            or obs.get("total_conflicts", 0) == 0
+            or obs.get("last_action_feedback", "").startswith("Internal error processing action:")
+        ):
+            raise RuntimeError(
+                "Environment /step returned an internal-error safety response: "
+                f"{obs.get('last_action_feedback', '')}"
+            )
 
         print(
             f"  Reward: {reward:.4f} | Resolved: "
@@ -191,9 +334,6 @@ def run_baseline() -> dict:
     Run baseline agent against all 3 tasks.
     Returns dict mapping task_id to score.
     """
-    if not API_KEY:
-        raise ValueError("HF_TOKEN or API_KEY environment variable must be set")
-
     scores = {}
     for task_id in ["task1", "task2", "task3"]:
         score = run_task(client, task_id)
@@ -214,7 +354,28 @@ def _timeout_handler(signum, frame):
     raise TimeoutError("Inference script exceeded 20 minute runtime limit")
 
 
+def _timeout_interrupt():
+    _thread.interrupt_main()
+
+
 if __name__ == "__main__":
-    signal.signal(signal.SIGALRM, _timeout_handler)
-    signal.alarm(1140)  # 19 minutes — 60 second buffer before hard 20min limit
-    scores = run_baseline()
+    timer = None
+    try:
+        if hasattr(signal, "SIGALRM"):
+            signal.signal(signal.SIGALRM, _timeout_handler)
+            signal.alarm(1140)  # 19 minutes — 60 second buffer before hard 20min limit
+        else:
+            timer = threading.Timer(1140, _timeout_interrupt)
+            timer.daemon = True
+            timer.start()
+
+        scores = run_baseline()
+    except KeyboardInterrupt as exc:
+        if timer is not None:
+            raise TimeoutError("Inference script exceeded 20 minute runtime limit") from exc
+        raise
+    finally:
+        if hasattr(signal, "SIGALRM"):
+            signal.alarm(0)
+        if timer is not None:
+            timer.cancel()

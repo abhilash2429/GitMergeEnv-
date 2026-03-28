@@ -21,8 +21,10 @@ Block summary:
   Conflict 0: imports — raw sqlite3 vs sqlalchemy imports. ORM wins.
   Conflict 1: connection setup — sqlite3.connect() vs Session(). ORM wins.
   Conflict 2: basic query — cursor.execute() vs session.query(). ORM wins.
-  Conflict 3: new feature (B added) — cursor-based insert. Must convert to ORM.
-  Conflict 4: new feature (B added) — cursor-based delete. Must convert to ORM.
+  Conflict 3: new feature (B added) — raw executemany bulk insert. Must become
+    ORM bulk_save_objects().
+  Conflict 4: new feature (B added) — soft delete via deleted_at timestamp.
+    Must preserve soft-delete semantics using ORM syntax.
 """
 
 TASK3 = {
@@ -44,7 +46,9 @@ TASK3 = {
     "num_conflicts": 5,
     "conflicted_file": '''\
 <<<<<<< HEAD
-from sqlalchemy import create_engine, Column, Integer, String, select, delete
+from datetime import datetime
+
+from sqlalchemy import create_engine, Column, DateTime, Integer, String, select
 from sqlalchemy.orm import DeclarativeBase, Session
 
 class Base(DeclarativeBase):
@@ -56,6 +60,7 @@ class User(Base):
     name = Column(String)
     email = Column(String)
     role = Column(String, default="user")
+    deleted_at = Column(DateTime, nullable=True)
 
 engine = create_engine("sqlite:///app.db")
 Base.metadata.create_all(engine)
@@ -95,23 +100,29 @@ def get_all_users():
 >>>>>>> feature/new-queries
 
 
-def create_user(name: str, email: str, role: str = "user"):
+def create_users(users: list[dict]):
 <<<<<<< HEAD
     with Session(engine) as session:
-        user = User(name=name, email=email, role=role)
-        session.add(user)
+        objects = [
+            User(
+                name=user["name"],
+                email=user["email"],
+                role=user.get("role", "user"),
+            )
+            for user in users
+        ]
+        session.bulk_save_objects(objects)
         session.commit()
-        session.refresh(user)
-        return user
+        return len(objects)
 =======
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute(
+    cursor.executemany(
         "INSERT INTO users (name, email, role) VALUES (?, ?, ?)",
-        (name, email, role)
+        [(user["name"], user["email"], user.get("role", "user")) for user in users],
     )
     conn.commit()
-    return cursor.lastrowid
+    return cursor.rowcount
 >>>>>>> feature/new-queries
 
 
@@ -120,20 +131,22 @@ def delete_user(user_id: int):
     with Session(engine) as session:
         user = session.get(User, user_id)
         if user:
-            session.delete(user)
+            user.deleted_at = datetime.utcnow()
             session.commit()
             return True
         return False
 =======
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM users WHERE id = ?", (user_id,))
+    cursor.execute("UPDATE users SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?", (user_id,))
     conn.commit()
     return cursor.rowcount > 0
 >>>>>>> feature/new-queries
 ''',
     "ground_truth_file": '''\
-from sqlalchemy import create_engine, Column, Integer, String, select, delete
+from datetime import datetime
+
+from sqlalchemy import create_engine, Column, DateTime, Integer, String, select
 from sqlalchemy.orm import DeclarativeBase, Session
 
 class Base(DeclarativeBase):
@@ -145,6 +158,7 @@ class User(Base):
     name = Column(String)
     email = Column(String)
     role = Column(String, default="user")
+    deleted_at = Column(DateTime, nullable=True)
 
 engine = create_engine("sqlite:///app.db")
 Base.metadata.create_all(engine)
@@ -160,27 +174,35 @@ def get_all_users():
         return session.execute(select(User)).scalars().all()
 
 
-def create_user(name: str, email: str, role: str = "user"):
+def create_users(users: list[dict]):
     with Session(engine) as session:
-        user = User(name=name, email=email, role=role)
-        session.add(user)
+        objects = [
+            User(
+                name=user["name"],
+                email=user["email"],
+                role=user.get("role", "user"),
+            )
+            for user in users
+        ]
+        session.bulk_save_objects(objects)
         session.commit()
-        session.refresh(user)
-        return user
+        return len(objects)
 
 
 def delete_user(user_id: int):
     with Session(engine) as session:
         user = session.get(User, user_id)
         if user:
-            session.delete(user)
+            user.deleted_at = datetime.utcnow()
             session.commit()
             return True
         return False
 ''',
     "ground_truth_blocks": [
         '''\
-from sqlalchemy import create_engine, Column, Integer, String, select, delete
+from datetime import datetime
+
+from sqlalchemy import create_engine, Column, DateTime, Integer, String, select
 from sqlalchemy.orm import DeclarativeBase, Session
 
 class Base(DeclarativeBase):
@@ -192,6 +214,7 @@ class User(Base):
     name = Column(String)
     email = Column(String)
     role = Column(String, default="user")
+    deleted_at = Column(DateTime, nullable=True)
 
 engine = create_engine("sqlite:///app.db")
 Base.metadata.create_all(engine)''',
@@ -203,38 +226,44 @@ Base.metadata.create_all(engine)''',
         return session.execute(select(User)).scalars().all()''',
         '''\
     with Session(engine) as session:
-        user = User(name=name, email=email, role=role)
-        session.add(user)
+        objects = [
+            User(
+                name=user["name"],
+                email=user["email"],
+                role=user.get("role", "user"),
+            )
+            for user in users
+        ]
+        session.bulk_save_objects(objects)
         session.commit()
-        session.refresh(user)
-        return user''',
+        return len(objects)''',
         '''\
     with Session(engine) as session:
         user = session.get(User, user_id)
         if user:
-            session.delete(user)
+            user.deleted_at = datetime.utcnow()
             session.commit()
             return True
         return False''',
     ],
     "required_elements": [
         "from sqlalchemy",
-        "Session(engine)",
-        "session.get(User",
-        "session.add(",
+        "DateTime",
+        "Session(",
+        "session.get(",
+        "bulk_save_objects",
         "session.commit()",
-        "session.delete(",
-        "select(User)",
+        "deleted_at",
+        "datetime.utcnow()",
+        "select(",
     ],
     "forbidden_elements": [
         "<<<<<<<",
         "=======",
         ">>>>>>>",
-        "import sqlite3",
         "sqlite3.connect",
         "cursor.execute",
         "conn.commit()",
-        "get_connection()",
     ],
     "consistency_checks": [
         {
@@ -246,8 +275,8 @@ Base.metadata.create_all(engine)''',
     ],
     "grader_weights": {
         "parses_cleanly": 0.05,
-        "no_conflict_markers": 0.05,
-        "block_match": 0.50,
+        "no_conflict_markers": 0.10,
+        "block_match": 0.45,
         "required_elements": 0.25,
         "architectural_consistency": 0.15,
     },

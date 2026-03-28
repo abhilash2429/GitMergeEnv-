@@ -194,33 +194,30 @@ async def grader(env: GitMergeEnvironment = Depends(get_env)):
 
 @app.post("/baseline", response_model=BaselineResult, tags=["openenv"])
 async def baseline():
-    """
-    Run the baseline inference script against all 3 tasks and return scores.
-    Uses NVIDIA_API_KEY or OPENAI_API_KEY from environment variables.
-    Produces reproducible scores.
-    """
-    if not (os.getenv("NVIDIA_API_KEY") or os.getenv("OPENAI_API_KEY")):
-        raise HTTPException(
-            status_code=400,
-            detail="NVIDIA_API_KEY or OPENAI_API_KEY environment variable not set",
-        )
-
     try:
-        from inference import run_baseline
+        provider = os.getenv("INFERENCE_PROVIDER", "huggingface").lower()
 
+        if provider == "nvidia" and not os.getenv("NVIDIA_API_KEY"):
+            raise HTTPException(status_code=400, detail="NVIDIA_API_KEY not set")
+        elif provider == "groq" and not os.getenv("GROQ_API_KEY"):
+            raise HTTPException(status_code=400, detail="GROQ_API_KEY not set")
+        elif provider == "huggingface" and not (os.getenv("HF_TOKEN") or os.getenv("API_KEY")):
+            raise HTTPException(status_code=400, detail="HF_TOKEN not set")
+
+        from inference import run_baseline
         scores = run_baseline()
         avg = sum(scores.values()) / len(scores)
         return BaselineResult(
             task_scores=scores,
             average_score=round(avg, 4),
-            model_used=os.getenv("BASELINE_MODEL", "gpt-4o-mini"),
+            model_used=os.getenv("MODEL_NAME", "moonshotai/kimi-k2-instruct"),
         )
-    except ImportError as exc:
-        raise HTTPException(status_code=500, detail="inference.py not found") from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Baseline run failed: {str(exc)}") from exc
+    except HTTPException:
+        raise
+    except ImportError:
+        raise HTTPException(status_code=500, detail="inference.py not found in root directory")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Baseline run failed: {str(e)}")
 
 
 def main() -> None:

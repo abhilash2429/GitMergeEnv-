@@ -97,7 +97,7 @@ class ConflictGrader:
         union = agent_tokens | truth_tokens
         jaccard = len(intersection) / len(union)
 
-        return round(jaccard * 0.9, 4)
+        return round(jaccard * 0.6, 4)
 
     def _parses_cleanly(self, code: str) -> bool:
         """Returns True if the code parses as valid Python."""
@@ -129,7 +129,10 @@ class ConflictGrader:
         per_block_weight = 1.0 / num_blocks
 
         for gt_block in ground_truth_blocks:
-            block_score = self._check_block_presence(agent_file, gt_block)
+            if task.get("id") == "task2":
+                block_score = self.grade_block(agent_file, gt_block)
+            else:
+                block_score = self._check_block_presence(agent_file, gt_block)
             total_block_score += per_block_weight * block_score
 
         return total_block_score
@@ -194,7 +197,7 @@ class ConflictGrader:
         """
         Multiplicative penalty for forbidden elements.
         Each forbidden element found reduces the multiplier by 0.15.
-        Minimum multiplier is 0.1 (never zero — there may still be partial credit).
+        Minimum multiplier is 0.25 (never zero — there may still be partial credit).
 
         Note: conflict markers are handled by no_conflict_markers component,
         so they are included in forbidden to apply double penalty for failing
@@ -205,7 +208,7 @@ class ConflictGrader:
             return 1.0
 
         violations = sum(1 for element in forbidden if element in agent_file)
-        penalty_multiplier = max(1.0 - (violations * 0.15), 0.10)
+        penalty_multiplier = max(1.0 - (violations * 0.15), 0.25)
         return penalty_multiplier
 
     def _normalize_whitespace(self, text: str) -> str:

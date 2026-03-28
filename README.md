@@ -84,30 +84,64 @@ Rewards are dense and multi-component:
 
 ## Setup
 
-### Local Development
+### Environment Variables
 
+Copy .env.example to .env and fill in your credentials:
 ```bash
-git clone <repo-url>
-cd git_merge_env
+copy .env.example .env
+```
+
+For local testing with Groq:
+```
+INFERENCE_PROVIDER=groq
+GROQ_API_KEY=your_groq_key
+MODEL_NAME=moonshotai/kimi-k2-instruct
+```
+
+For production and submission with HuggingFace:
+```
+INFERENCE_PROVIDER=huggingface
+HF_TOKEN=your_hf_token
+MODEL_NAME=meta-llama/Llama-3.3-70B-Instruct
+```
+
+### Run Locally
+```bash
 pip install -r server/requirements.txt
-uvicorn server.app:app --host 0.0.0.0 --port 7860
+uvicorn server.app:app --host 0.0.0.0 --port 7860 --reload
+```
+
+### Run Baseline
+```bash
+# Groq (local testing)
+set INFERENCE_PROVIDER=groq
+set GROQ_API_KEY=your_key
+python inference.py
+
+# HuggingFace (submission)
+set INFERENCE_PROVIDER=huggingface
+set HF_TOKEN=your_token
+python inference.py
 ```
 
 ### Docker
-
 ```bash
+# Build
 docker build -f server/Dockerfile -t git_merge_env .
-docker run -p 7860:7860 -e HF_TOKEN=your_huggingface_token git_merge_env
-```
 
-### Baseline
+# Run with Groq
+docker run -p 7860:7860 \
+  -e INFERENCE_PROVIDER=groq \
+  -e GROQ_API_KEY=your_groq_key \
+  -e MODEL_NAME=moonshotai/kimi-k2-instruct \
+  git_merge_env
 
-```bash
-export HF_TOKEN=your_huggingface_token
-export API_BASE_URL=https://router.huggingface.co/v1
-export MODEL_NAME=nvidia/llama-3.1-nemotron-70b-instruct
-export BASE_URL=http://localhost:7860
-python inference.py
+# Run with HuggingFace
+docker run -p 7860:7860 \
+  -e INFERENCE_PROVIDER=huggingface \
+  -e HF_TOKEN=your_hf_token \
+  -e MODEL_NAME=meta-llama/Llama-3.3-70B-Instruct \
+  git_merge_env
 ```
 
 ## Baseline Scores

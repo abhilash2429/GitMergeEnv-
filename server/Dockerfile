@@ -2,6 +2,15 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+ENV INFERENCE_PROVIDER=huggingface
+ENV HF_TOKEN=""
+ENV GROQ_API_KEY=""
+ENV NVIDIA_API_KEY=""
+ENV MODEL_NAME=""
+ENV API_BASE_URL=""
+ENV PORT=7860
+ENV BASE_URL=http://localhost:7860
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
