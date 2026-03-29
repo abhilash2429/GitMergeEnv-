@@ -38,3 +38,6 @@ htmlcov/
 
 .DS_Store
 Thumbs.db
+AGENTS.md
+Rules.md
+.gitignore
