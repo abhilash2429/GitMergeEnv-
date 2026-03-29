@@ -6,17 +6,13 @@ Runs a GPT model as an agent against all 3 tasks.
 Uses the OpenAI API client with the environment's HTTP API.
 
 Usage:
-    export INFERENCE_PROVIDER=groq
-    export GROQ_API_KEY=your_groq_api_key
-    export API_BASE_URL=https://api.groq.com/openai/v1
-    export MODEL_NAME=moonshotai/kimi-k2-instruct
+    export API_BASE_URL=https://router.huggingface.co/v1
+    export MODEL_NAME=meta-llama/Llama-3.3-70B-Instruct
+    export HF_TOKEN=your_huggingface_token
     export BASE_URL=http://localhost:7860   # or your HF Space URL
     python inference.py
 
 Environment variables:
-    INFERENCE_PROVIDER — "groq", "nvidia" or "huggingface"
-    GROQ_API_KEY     — Groq API key
-    NVIDIA_API_KEY   — NVIDIA NIM API key
     HF_TOKEN         — Hugging Face token
     API_KEY          — Hugging Face fallback
     API_BASE_URL     — OpenAI-compatible inference API URL
@@ -38,32 +34,19 @@ from openai import OpenAI
 load_dotenv()
 
 BASE_URL = os.getenv("BASE_URL", "http://localhost:7860")
-INFERENCE_PROVIDER = os.getenv("INFERENCE_PROVIDER", "huggingface").lower()
+API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
+API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
+MODEL_NAME = os.getenv("MODEL_NAME", "meta-llama/Llama-3.3-70B-Instruct")
 
-if INFERENCE_PROVIDER == "nvidia":
-    API_BASE_URL = os.getenv("API_BASE_URL", "https://integrate.api.nvidia.com/v1")
-    API_KEY = os.getenv("NVIDIA_API_KEY")
-    MODEL_NAME = os.getenv("MODEL_NAME", "meta/llama-3.3-70b-instruct")
-    if not API_KEY:
-        raise ValueError("NVIDIA_API_KEY must be set when INFERENCE_PROVIDER=nvidia")
+if not API_KEY:
+    raise ValueError(
+        "HF_TOKEN environment variable must be set. "
+        "Get your token at https://huggingface.co/settings/tokens"
+    )
 
-elif INFERENCE_PROVIDER == "groq":
-    API_BASE_URL = os.getenv("API_BASE_URL", "https://api.groq.com/openai/v1")
-    API_KEY = os.getenv("GROQ_API_KEY")
-    MODEL_NAME = os.getenv("MODEL_NAME", "moonshotai/kimi-k2-instruct")
-    if not API_KEY:
-        raise ValueError("GROQ_API_KEY must be set when INFERENCE_PROVIDER=groq")
+if not MODEL_NAME:
+    raise ValueError("MODEL_NAME environment variable must be set.")
 
-else:
-    # Default: huggingface  used for submission
-    INFERENCE_PROVIDER = "huggingface"
-    API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
-    API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
-    MODEL_NAME = os.getenv("MODEL_NAME", "meta-llama/Llama-3.3-70B-Instruct")
-    if not API_KEY:
-        raise ValueError("HF_TOKEN must be set when INFERENCE_PROVIDER=huggingface")
-
-print(f"[inference] Provider: {INFERENCE_PROVIDER}")
 print(f"[inference] Base URL: {API_BASE_URL}")
 print(f"[inference] Model: {MODEL_NAME}")
 
@@ -115,25 +98,6 @@ def call_env(endpoint: str, method: str = "POST", body: dict = None) -> dict:
             response = client.post(url, json=body or {})
     response.raise_for_status()
     return response.json()
-
-
-def create_nvidia_chat_completion(messages: list[dict]) -> str:
-    """Call the NVIDIA NIM chat completions endpoint via the OpenAI client."""
-    completion = client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=messages,
-        temperature=0.2,
-        top_p=0.7,
-        max_tokens=1024,
-        stream=True,
-    )
-
-    chunks: list[str] = []
-    for chunk in completion:
-        if chunk.choices and chunk.choices[0].delta.content is not None:
-            chunks.append(chunk.choices[0].delta.content)
-
-    return "".join(chunks)
 
 
 def _normalize_action_text(raw_response: str) -> str:
@@ -253,18 +217,17 @@ def run_task(client: OpenAI, task_id: str) -> float:
     final_score = 0.0
 
     for step_num in range(MAX_STEPS_OVERRIDE):
-        if INFERENCE_PROVIDER == "nvidia":
-            raw_response = create_nvidia_chat_completion(messages)
-        else:
+        try:
             completion = client.chat.completions.create(
                 model=MODEL_NAME,
                 messages=messages,
-                temperature=0.2,
-                top_p=0.7,
-                max_tokens=1024,
+                temperature=0.0,
+                max_tokens=500,
             )
-
             raw_response = completion.choices[0].message.content or ""
+        except Exception as exc:
+            print(f"Step {step_num}: API call failed ({exc}). Using fallback inspect action.")
+            raw_response = '{"action_type": "inspect", "conflict_id": 0}'
 
         action = _parse_action(raw_response)
         if action is None:
@@ -336,7 +299,11 @@ def run_baseline() -> dict:
     """
     scores = {}
     for task_id in ["task1", "task2", "task3"]:
-        score = run_task(client, task_id)
+        try:
+            score = run_task(client, task_id)
+        except Exception as exc:
+            print(f"Task {task_id} failed entirely: {exc}. Recording score 0.0")
+            score = 0.0
         scores[task_id] = round(score, 4)
 
     print(f"\n{'=' * 60}")

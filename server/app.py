@@ -195,14 +195,11 @@ async def grader(env: GitMergeEnvironment = Depends(get_env)):
 @app.post("/baseline", response_model=BaselineResult, tags=["openenv"])
 async def baseline():
     try:
-        provider = os.getenv("INFERENCE_PROVIDER", "huggingface").lower()
-
-        if provider == "nvidia" and not os.getenv("NVIDIA_API_KEY"):
-            raise HTTPException(status_code=400, detail="NVIDIA_API_KEY not set")
-        elif provider == "groq" and not os.getenv("GROQ_API_KEY"):
-            raise HTTPException(status_code=400, detail="GROQ_API_KEY not set")
-        elif provider == "huggingface" and not (os.getenv("HF_TOKEN") or os.getenv("API_KEY")):
-            raise HTTPException(status_code=400, detail="HF_TOKEN not set")
+        if not (os.getenv("HF_TOKEN") or os.getenv("API_KEY")):
+            raise HTTPException(
+                status_code=400,
+                detail="HF_TOKEN environment variable not set."
+            )
 
         from inference import run_baseline
         scores = run_baseline()
@@ -210,7 +207,7 @@ async def baseline():
         return BaselineResult(
             task_scores=scores,
             average_score=round(avg, 4),
-            model_used=os.getenv("MODEL_NAME", "moonshotai/kimi-k2-instruct"),
+            model_used=os.getenv("MODEL_NAME", "meta-llama/Llama-3.3-70B-Instruct"),
         )
     except HTTPException:
         raise

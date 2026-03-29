@@ -1,3 +1,14 @@
+---
+title: GitMergeEnv
+emoji: 🤖
+colorFrom: blue
+colorTo: purple
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
+
 # GitMergeEnv
 
 > An OpenEnv environment for training AI agents to resolve git merge conflicts
@@ -84,26 +95,20 @@ Rewards are dense and multi-component:
 
 ## Setup
 
-### Environment Variables
-
-Copy .env.example to .env and fill in your credentials:
+Set these three variables before running anything:
 ```bash
-copy .env.example .env
+# Windows PowerShell
+$env:API_BASE_URL = "https://router.huggingface.co/v1"
+$env:MODEL_NAME = "meta-llama/Llama-3.3-70B-Instruct"
+$env:HF_TOKEN = "your_huggingface_token_here"
+
+# Linux/Mac
+export API_BASE_URL=https://router.huggingface.co/v1
+export MODEL_NAME=meta-llama/Llama-3.3-70B-Instruct
+export HF_TOKEN=your_huggingface_token_here
 ```
 
-For local testing with Groq:
-```
-INFERENCE_PROVIDER=groq
-GROQ_API_KEY=your_groq_key
-MODEL_NAME=moonshotai/kimi-k2-instruct
-```
-
-For production and submission with HuggingFace:
-```
-INFERENCE_PROVIDER=huggingface
-HF_TOKEN=your_hf_token
-MODEL_NAME=meta-llama/Llama-3.3-70B-Instruct
-```
+Get your HF token at https://huggingface.co/settings/tokens
 
 ### Run Locally
 ```bash
@@ -113,35 +118,17 @@ uvicorn server.app:app --host 0.0.0.0 --port 7860 --reload
 
 ### Run Baseline
 ```bash
-# Groq (local testing)
-set INFERENCE_PROVIDER=groq
-set GROQ_API_KEY=your_key
+# Windows PowerShell
+$env:API_BASE_URL = "https://router.huggingface.co/v1"
+$env:MODEL_NAME = "meta-llama/Llama-3.3-70B-Instruct"
+$env:HF_TOKEN = "your_huggingface_token_here"
 python inference.py
 
-# HuggingFace (submission)
-set INFERENCE_PROVIDER=huggingface
-set HF_TOKEN=your_token
+# Linux/Mac
+export API_BASE_URL=https://router.huggingface.co/v1
+export MODEL_NAME=meta-llama/Llama-3.3-70B-Instruct
+export HF_TOKEN=your_huggingface_token_here
 python inference.py
-```
-
-### Docker
-```bash
-# Build
-docker build -f server/Dockerfile -t git_merge_env .
-
-# Run with Groq
-docker run -p 7860:7860 \
-  -e INFERENCE_PROVIDER=groq \
-  -e GROQ_API_KEY=your_groq_key \
-  -e MODEL_NAME=moonshotai/kimi-k2-instruct \
-  git_merge_env
-
-# Run with HuggingFace
-docker run -p 7860:7860 \
-  -e INFERENCE_PROVIDER=huggingface \
-  -e HF_TOKEN=your_hf_token \
-  -e MODEL_NAME=meta-llama/Llama-3.3-70B-Instruct \
-  git_merge_env
 ```
 
 ## Baseline Scores
