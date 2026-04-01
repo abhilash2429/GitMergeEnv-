@@ -102,8 +102,9 @@ def process_user(user_info, config, timeout=30):
     "grader_weights": {
         "parses_cleanly": 0.15,
         "no_conflict_markers": 0.10,
-        "block_match": 0.50,
+        "block_match": 0.40,
         "required_elements": 0.25,
+        "structural_similarity": 0.10,
     },
     "expected_baseline_score": (0.75, 0.95),
 }

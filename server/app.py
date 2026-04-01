@@ -16,7 +16,7 @@ from models import (
 )
 from server.environment import GitMergeEnvironment
 from server.grader import ConflictGrader
-from server.tasks import TASK_LIST
+from server.tasks import ALL_TASKS, TASK_LIST
 
 
 @asynccontextmanager
@@ -190,6 +190,41 @@ async def grader(env: GitMergeEnvironment = Depends(get_env)):
         components=components,
         feedback=" ".join(feedback_parts),
     )
+
+
+@app.post("/validate", tags=["openenv"])
+async def validate():
+    """
+    Self-validation endpoint. Runs the grader against known inputs
+    and verifies it produces expected outputs. Judges can use this
+    to confirm the grader is deterministic and correctly implemented.
+    """
+    g = ConflictGrader()
+    results = {}
+
+    for task_id, task in ALL_TASKS.items():
+        perfect_score, _ = g.grade(task["ground_truth_file"], task)
+        empty_score, _ = g.grade("", task)
+        marker_score, _ = g.grade(task["conflicted_file"], task)
+
+        results[task_id] = {
+            "perfect_input_score": perfect_score,
+            "empty_input_score": empty_score,
+            "unresolved_input_score": marker_score,
+            "grader_behaves_correctly": (
+                perfect_score > 0.7 and
+                empty_score < 0.2 and
+                marker_score < 0.3
+            ),
+        }
+
+    all_correct = all(result["grader_behaves_correctly"] for result in results.values())
+
+    return {
+        "validation_passed": all_correct,
+        "task_results": results,
+        "message": "All graders behaving correctly" if all_correct else "Some graders need attention",
+    }
 
 
 @app.post("/baseline", response_model=BaselineResult, tags=["openenv"])

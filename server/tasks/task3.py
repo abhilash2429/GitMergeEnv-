@@ -276,9 +276,10 @@ Base.metadata.create_all(engine)''',
     "grader_weights": {
         "parses_cleanly": 0.05,
         "no_conflict_markers": 0.10,
-        "block_match": 0.45,
+        "block_match": 0.35,
         "required_elements": 0.25,
         "architectural_consistency": 0.15,
+        "structural_similarity": 0.10,
     },
     "expected_baseline_score": (0.20, 0.45),
 }

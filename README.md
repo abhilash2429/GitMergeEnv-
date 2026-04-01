@@ -90,6 +90,7 @@ Rewards are dense and multi-component:
 | /state | GET | Get episode state |
 | /tasks | GET | List all tasks |
 | /grader | POST | Score current state |
+| /validate | POST | Run grader self-checks |
 | /baseline | POST | Run baseline agent |
 | /health | GET | Health check |
 
@@ -133,11 +134,18 @@ python inference.py
 
 ## Baseline Scores
 
-| Task | Score | Model |
-|------|-------|-------|
-| task1 | ~0.82 | gpt-4o-mini |
-| task2 | ~0.54 | gpt-4o-mini |
-| task3 | ~0.31 | gpt-4o-mini |
+Evaluated using `meta-llama/Llama-3.3-70B-Instruct` via HuggingFace router.
+
+| Task | Score | Difficulty | Notes |
+|------|-------|------------|-------|
+| task1 | ~0.77 | Easy | Single conflict, variable rename |
+| task2 | ~0.60 | Medium | Three conflicts, requires merging both changes |
+| task3 | ~0.20 | Hard | Five architecturally dependent conflicts |
+| **Average** | **~0.52** | | |
+
+Scores reflect genuine difficulty progression. Task3 is designed to challenge
+models that resolve conflicts independently without tracking architectural
+consistency across blocks.
 
 ## OpenEnv Compliance
 

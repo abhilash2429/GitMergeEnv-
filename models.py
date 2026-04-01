@@ -46,6 +46,7 @@ class MergeObservation(BaseModel):
     last_action_feedback: str = Field(..., description="Human-readable feedback on last action")
     last_reward: float = Field(..., description="Reward received for the last action")
     steps_remaining: int = Field(..., description="Steps left before forced episode termination")
+    hint: Optional[str] = Field(None, description="Contextual hint when agent is running low on steps")
 
 
 class MergeReward(BaseModel):
@@ -113,6 +114,8 @@ class BaselineResult(BaseModel):
     """
     Returned by /baseline endpoint.
     """
+
+    model_config = {"protected_namespaces": ()}
 
     task_scores: dict
     average_score: float

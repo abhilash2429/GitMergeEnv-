@@ -58,6 +58,12 @@ class ConflictGrader:
         elif "architectural_consistency" in weights:
             components["architectural_consistency"] = 1.0
 
+        structural_score = self._score_structural_similarity(
+            agent_file,
+            task["ground_truth_file"],
+        )
+        components["structural_similarity"] = structural_score
+
         forbidden_penalty = self._compute_forbidden_penalty(agent_file, task)
         components["forbidden_penalty"] = round(forbidden_penalty, 4)
 
@@ -129,10 +135,7 @@ class ConflictGrader:
         per_block_weight = 1.0 / num_blocks
 
         for gt_block in ground_truth_blocks:
-            if task.get("id") == "task2":
-                block_score = self.grade_block(agent_file, gt_block)
-            else:
-                block_score = self._check_block_presence(agent_file, gt_block)
+            block_score = self._check_block_presence(agent_file, gt_block)
             total_block_score += per_block_weight * block_score
 
         return total_block_score
@@ -192,6 +195,26 @@ class ConflictGrader:
                 score += check["weight"]
 
         return score / total_weight if total_weight > 0 else 1.0
+
+    def _score_structural_similarity(self, agent_file: str, ground_truth_file: str) -> float:
+        """
+        Check if agent preserves the same function/class definitions as ground truth.
+        Uses regex to extract def and class signatures and compares them.
+        A resolution that changes function names or removes classes scores poorly.
+        """
+
+        def extract_signatures(code: str) -> set:
+            pattern = re.compile(r"^\s*(?:def|class)\s+\w+[^:]*:", re.MULTILINE)
+            return {match.group().strip() for match in pattern.finditer(code)}
+
+        agent_sigs = extract_signatures(agent_file)
+        truth_sigs = extract_signatures(ground_truth_file)
+
+        if not truth_sigs:
+            return 1.0
+
+        preserved = agent_sigs & truth_sigs
+        return round(len(preserved) / len(truth_sigs), 4)
 
     def _compute_forbidden_penalty(self, agent_file: str, task: dict) -> float:
         """

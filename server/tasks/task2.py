@@ -143,8 +143,9 @@ logger = logging.getLogger(__name__)''',
     "grader_weights": {
         "parses_cleanly": 0.10,
         "no_conflict_markers": 0.10,
-        "block_match": 0.50,
+        "block_match": 0.40,
         "required_elements": 0.30,
+        "structural_similarity": 0.10,
     },
     "expected_baseline_score": (0.45, 0.70),
 }
