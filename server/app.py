@@ -10,7 +10,6 @@ from models import (
     GraderResult,
     MergeAction,
     MergeObservation,
-    MergeReward,
     StepResult,
     TaskInfo,
 )
@@ -234,7 +233,7 @@ async def baseline():
         return BaselineResult(
             task_scores=scores,
             average_score=round(avg, 4),
-            model_used=os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct"),
+            model_used=os.getenv("MODEL_NAME", "meta-llama/Llama-3.3-70B-Instruct"),
         )
     except HTTPException:
         raise
