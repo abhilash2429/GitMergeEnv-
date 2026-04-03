@@ -41,7 +41,6 @@ class ConflictGrader:
         if not parses:
             components["parses_cleanly"] = 0.0
             parse_penalty = 0.5
-            print(f"[grader debug] Parse failed — applying 0.5 penalty multiplier")
         else:
             components["parses_cleanly"] = 1.0
             parse_penalty = 1.0

@@ -3,8 +3,8 @@ FROM python:3.11-slim
 WORKDIR /app
 
 ENV API_BASE_URL=https://router.huggingface.co/v1
-ENV MODEL_NAME=meta-llama/Llama-3.3-70B-Instruct
 ENV HF_TOKEN=""
+ENV MODEL_NAME=Qwen/Qwen2.5-72B-Instruct
 ENV BASE_URL=http://localhost:7860
 ENV PORT=7860
 
@@ -28,4 +28,4 @@ EXPOSE 7860
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD python -c "import httpx; httpx.get('http://localhost:7860/health').raise_for_status()"
 
-CMD ["uvicorn", "server.app:app", "--host", "0.0.0.0", "--port", "7860", "--workers", "1"]
+CMD ["uvicorn", "server.app:app", "--host", "0.0.0.0", "--port", "7860", "--workers", "1", "--timeout-keep-alive", "75", "--log-level", "info"]

@@ -1,84 +1,36 @@
-"""
-inference.py
-
-Baseline inference script for GitMergeEnv.
-Runs a GPT model as an agent against all 3 tasks.
-Uses the OpenAI API client with the environment's HTTP API.
-
-Usage:
-    export API_BASE_URL=https://router.huggingface.co/v1
-    export MODEL_NAME=meta-llama/Llama-3.3-70B-Instruct
-    export HF_TOKEN=your_huggingface_token
-    export BASE_URL=http://localhost:7860   # or your HF Space URL
-    python inference.py
-
-Environment variables:
-    HF_TOKEN         — Hugging Face token
-    API_KEY          — Hugging Face fallback
-    NVIDIA_API_KEY   — NVIDIA NIM key for development testing
-    API_BASE_URL     — OpenAI-compatible inference API URL
-    MODEL_NAME       — model to use
-    BASE_URL         — environment URL (default: http://localhost:7860)
-"""
-
-import _thread
-import ast
-import json
 import os
 import re
-import signal
-import threading
+import json
 import time
-import textwrap
-
-import httpx
-from dotenv import load_dotenv
+import signal
 from openai import OpenAI
 
-load_dotenv()
-
-BASE_URL = os.getenv("BASE_URL", "http://localhost:7860")
+# -------------------------------------------------------
+# Credentials — judges set these three variables
+# -------------------------------------------------------
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
-RAW_MODEL_NAME = os.getenv("MODEL_NAME", "meta-llama/Llama-3.3-70B-Instruct")
-
-
-def _normalize_model_name(model_name: str) -> str:
-    """Normalize common provider-specific model-name typos."""
-    normalized = model_name.strip()
-    if normalized.startswith("meta/llama-3_3"):
-        normalized = normalized.replace("llama-3_3", "llama-3.3", 1)
-    return normalized
-
-
-MODEL_NAME = _normalize_model_name(RAW_MODEL_NAME)
-IS_NVIDIA_NIM = "integrate.api.nvidia.com" in API_BASE_URL
-
-if IS_NVIDIA_NIM:
-    API_KEY = os.getenv("NVIDIA_API_KEY") or os.getenv("API_KEY") or os.getenv("HF_TOKEN")
-else:
-    API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY") or os.getenv("NVIDIA_API_KEY")
+API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
+MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
 
 if not API_KEY:
     raise ValueError(
-        "HF_TOKEN, API_KEY, or NVIDIA_API_KEY environment variable must be set. "
-        "For Hugging Face tokens, get one at https://huggingface.co/settings/tokens"
+        "HF_TOKEN environment variable must be set. "
+        "Get your token at https://huggingface.co/settings/tokens"
     )
-
-if not MODEL_NAME:
-    raise ValueError("MODEL_NAME environment variable must be set.")
 
 print(f"[inference] Base URL: {API_BASE_URL}")
 print(f"[inference] Model: {MODEL_NAME}")
-if RAW_MODEL_NAME != MODEL_NAME:
-    print(f"[inference] Normalized model name from '{RAW_MODEL_NAME}' to '{MODEL_NAME}'")
-
-MAX_STEPS_OVERRIDE = 20  # safety cap
 
 client = OpenAI(
     base_url=API_BASE_URL,
     api_key=API_KEY,
+    timeout=30.0,
+    max_retries=2,
 )
 
+BASE_URL = os.getenv("BASE_URL", "http://localhost:7860")
+MAX_STEPS_OVERRIDE = 20
+MAX_TOKENS = 300
 
 SYSTEM_PROMPT = """\
 You are an expert software engineer resolving git merge conflicts in Python files.
@@ -112,6 +64,8 @@ Respond ONLY with a valid JSON action. No explanation. No markdown. Just JSON.
 
 def call_env(endpoint: str, method: str = "POST", body: dict = None) -> dict:
     """Make HTTP request to the environment."""
+    import httpx
+
     url = f"{BASE_URL}{endpoint}"
     with httpx.Client(timeout=30.0) as client:
         if method == "GET":
@@ -126,27 +80,11 @@ def _create_completion_text(messages: list[dict]) -> str:
     """Create a chat completion and return plain response text."""
     for attempt in range(3):
         try:
-            if IS_NVIDIA_NIM:
-                completion = client.chat.completions.create(
-                    model=MODEL_NAME,
-                    messages=messages,
-                    temperature=0.2,
-                    top_p=0.7,
-                    max_tokens=1024,
-                    stream=True,
-                )
-
-                chunks: list[str] = []
-                for chunk in completion:
-                    if chunk.choices and chunk.choices[0].delta.content is not None:
-                        chunks.append(chunk.choices[0].delta.content)
-                return "".join(chunks)
-
             completion = client.chat.completions.create(
                 model=MODEL_NAME,
                 messages=messages,
                 temperature=0.0,
-                max_tokens=500,
+                max_tokens=MAX_TOKENS,
             )
             return completion.choices[0].message.content or ""
         except Exception as exc:
@@ -160,6 +98,8 @@ def _create_completion_text(messages: list[dict]) -> str:
 
 def _parses_cleanly(code: str) -> tuple[bool, str | None]:
     """Check whether the current file preview parses as Python."""
+    import ast
+
     try:
         ast.parse(code)
         return True, None
@@ -207,6 +147,8 @@ def _block_base_indent(context: dict) -> str:
 
 def _normalize_indented_block(text: str, indent: str) -> str:
     """Normalize a resolution to the expected block indentation."""
+    import textwrap
+
     normalized = textwrap.dedent(text).strip("\n")
     if not normalized:
         return normalized
@@ -220,6 +162,8 @@ def _normalize_indented_block(text: str, indent: str) -> str:
 
 def _normalize_docstring_block(text: str, indent: str) -> str:
     """Ensure docstring resolutions remain valid Python docstrings."""
+    import textwrap
+
     normalized = textwrap.dedent(text).strip()
     if '"""' in normalized or "'''" in normalized:
         return _normalize_indented_block(normalized, indent)
@@ -367,6 +311,7 @@ def run_task(client: OpenAI, task_id: str) -> float:
     forced_review_block = 0
 
     for step_num in range(MAX_STEPS_OVERRIDE):
+        step_start = time.time()
         action = None
         raw_response = ""
 
@@ -451,7 +396,7 @@ def run_task(client: OpenAI, task_id: str) -> float:
 
         print(
             f"  Reward: {reward:.4f} | Resolved: "
-            f"{obs['resolved_conflicts']}/{obs['total_conflicts']}"
+            f"{obs['resolved_conflicts']}/{obs['total_conflicts']} | Time: {time.time() - step_start:.1f}s"
         )
 
         if "block_score" in result["info"] and action.get("conflict_id") is not None:
@@ -484,6 +429,8 @@ def run_task(client: OpenAI, task_id: str) -> float:
                 ),
             }
         )
+        if len(messages) > 10:
+            messages = [messages[0], messages[1]] + messages[-8:]
 
         if done:
             grader_result = call_env("/grader", method="POST")
@@ -521,34 +468,21 @@ def run_baseline() -> dict:
     print(f"  Average: {avg:.4f}")
 
     return scores
-
-
-def _timeout_handler(signum, frame):
-    raise TimeoutError("Inference script exceeded 20 minute runtime limit")
-
-
-def _timeout_interrupt():
-    _thread.interrupt_main()
-
-
 if __name__ == "__main__":
-    timer = None
-    try:
-        if hasattr(signal, "SIGALRM"):
-            signal.signal(signal.SIGALRM, _timeout_handler)
-            signal.alarm(1140)  # 19 minutes — 60 second buffer before hard 20min limit
-        else:
-            timer = threading.Timer(1140, _timeout_interrupt)
-            timer.daemon = True
-            timer.start()
+    # 19-minute hard limit with 60 second buffer
+    # signal.SIGALRM is Unix-only — use threading on Windows
+    import threading
 
+    def _timeout_handler():
+        print("\n[inference] 19-minute time limit reached. Stopping.")
+        import sys
+        sys.exit(1)
+
+    timer = threading.Timer(1140, _timeout_handler)
+    timer.daemon = True
+    timer.start()
+
+    try:
         scores = run_baseline()
-    except KeyboardInterrupt as exc:
-        if timer is not None:
-            raise TimeoutError("Inference script exceeded 20 minute runtime limit") from exc
-        raise
     finally:
-        if hasattr(signal, "SIGALRM"):
-            signal.alarm(0)
-        if timer is not None:
-            timer.cancel()
+        timer.cancel()

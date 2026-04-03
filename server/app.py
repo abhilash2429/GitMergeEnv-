@@ -222,10 +222,10 @@ async def validate():
 @app.post("/baseline", response_model=BaselineResult, tags=["openenv"])
 async def baseline():
     try:
-        if not (os.getenv("HF_TOKEN") or os.getenv("API_KEY") or os.getenv("NVIDIA_API_KEY")):
+        if not (os.getenv("HF_TOKEN") or os.getenv("API_KEY")):
             raise HTTPException(
                 status_code=400,
-                detail="HF_TOKEN, API_KEY, or NVIDIA_API_KEY environment variable not set."
+                detail="HF_TOKEN or API_KEY environment variable not set."
             )
 
         from inference import run_baseline
@@ -234,7 +234,7 @@ async def baseline():
         return BaselineResult(
             task_scores=scores,
             average_score=round(avg, 4),
-            model_used=os.getenv("MODEL_NAME", "meta-llama/Llama-3.3-70B-Instruct"),
+            model_used=os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct"),
         )
     except HTTPException:
         raise

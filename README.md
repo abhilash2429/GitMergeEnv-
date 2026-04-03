@@ -96,20 +96,25 @@ Rewards are dense and multi-component:
 
 ## Setup
 
-Set these three variables before running anything:
-```bash
-# Windows PowerShell
-$env:API_BASE_URL = "https://router.huggingface.co/v1"
-$env:MODEL_NAME = "meta-llama/Llama-3.3-70B-Instruct"
-$env:HF_TOKEN = "your_huggingface_token_here"
+Set these three variables:
 
-# Linux/Mac
-export API_BASE_URL=https://router.huggingface.co/v1
-export MODEL_NAME=meta-llama/Llama-3.3-70B-Instruct
-export HF_TOKEN=your_huggingface_token_here
+**Windows PowerShell:**
+```powershell
+$env:API_BASE_URL = "https://router.huggingface.co/v1"
+$env:HF_TOKEN = "your_huggingface_token_here"
+$env:MODEL_NAME = "Qwen/Qwen2.5-72B-Instruct"
+python inference.py
 ```
 
-Get your HF token at https://huggingface.co/settings/tokens
+**Linux/Mac:**
+```bash
+export API_BASE_URL=https://router.huggingface.co/v1
+export HF_TOKEN=your_huggingface_token_here
+export MODEL_NAME=Qwen/Qwen2.5-72B-Instruct
+python inference.py
+```
+
+Get your HF token at: https://huggingface.co/settings/tokens
 
 ### Run Locally
 ```bash
@@ -121,36 +126,16 @@ uvicorn server.app:app --host 0.0.0.0 --port 7860 --reload
 ```bash
 # Windows PowerShell
 $env:API_BASE_URL = "https://router.huggingface.co/v1"
-$env:MODEL_NAME = "meta-llama/Llama-3.3-70B-Instruct"
 $env:HF_TOKEN = "your_huggingface_token_here"
+$env:MODEL_NAME = "Qwen/Qwen2.5-72B-Instruct"
 python inference.py
 
 # Linux/Mac
 export API_BASE_URL=https://router.huggingface.co/v1
-export MODEL_NAME=meta-llama/Llama-3.3-70B-Instruct
 export HF_TOKEN=your_huggingface_token_here
+export MODEL_NAME=Qwen/Qwen2.5-72B-Instruct
 python inference.py
 ```
-
-### Development Testing with NVIDIA NIM
-```bash
-# Windows PowerShell
-$env:API_BASE_URL = "https://integrate.api.nvidia.com/v1"
-$env:NVIDIA_API_KEY = "your_nvidia_nim_key_here"
-$env:MODEL_NAME = "your_nim_model_here"
-python inference.py
-
-# Linux/Mac
-export API_BASE_URL=https://integrate.api.nvidia.com/v1
-export NVIDIA_API_KEY=your_nvidia_nim_key_here
-export MODEL_NAME=your_nim_model_here
-python inference.py
-```
-
-This uses the same OpenAI-compatible client path as Hugging Face. The default
-judge-facing Hugging Face flow remains unchanged.
-For Llama 3.3 on NIM, use `meta/llama-3.3-70b-instruct`.
-If you use `meta/llama-3_3-70b-instruct`, NIM returns `404 page not found`.
 
 ## Baseline Scores
 
