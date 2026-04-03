@@ -59,6 +59,9 @@ Strategy:
 - Submit only when all conflicts are resolved
 
 Respond ONLY with a valid JSON action. No explanation. No markdown. Just JSON.
+
+CRITICAL SUBMISSION RULE:
+Once observation shows resolved_conflicts == total_conflicts, you MUST call submit on your very next action. Do not inspect or re-resolve any block after all conflicts are resolved. Calling submit when all blocks are resolved is mandatory and immediate. Any action other than submit when resolved_conflicts == total_conflicts wastes steps and reduces your score.
 """
 
 
@@ -310,7 +313,7 @@ def run_task(client: OpenAI, task_id: str) -> float:
     forced_review_active = False
     forced_review_block = 0
 
-    for step_num in range(MAX_STEPS_OVERRIDE):
+    for step_idx in range(MAX_STEPS_OVERRIDE):
         step_start = time.time()
         action = None
         raw_response = ""
@@ -354,21 +357,33 @@ def run_task(client: OpenAI, task_id: str) -> float:
             try:
                 raw_response = _create_completion_text(messages)
             except Exception as exc:
-                print(f"Step {step_num}: API call failed ({exc}). Using fallback inspect action.")
+                print(f"Step {step_idx}: API call failed ({exc}). Using fallback inspect action.")
                 raw_response = '{"action_type": "inspect", "conflict_id": 0}'
 
             action = _parse_action(raw_response)
             if action is None:
                 action_preview = _normalize_action_text(raw_response)
-                print(f"Step {step_num}: LLM returned invalid JSON: {action_preview[:100]}")
+                print(f"Step {step_idx}: LLM returned invalid JSON: {action_preview[:100]}")
                 action = {"action_type": "inspect", "conflict_id": 0}
 
             if forced_review_active and action.get("action_type") == "submit":
                 action = {"action_type": "inspect", "conflict_id": forced_review_block}
                 raw_response = json.dumps(action)
 
+        if (
+            obs.get("resolved_conflicts") == obs.get("total_conflicts")
+            and obs.get("total_conflicts", 0) > 0
+            and action.get("action_type") != "submit"
+        ):
+            print(
+                f"Step {step_idx}: All blocks resolved — forcing submit "
+                f"(LLM said {action.get('action_type')})"
+            )
+            action = {"action_type": "submit"}
+            raw_response = json.dumps(action)
+
         print(
-            f"Step {step_num}: {action.get('action_type', 'unknown')} "
+            f"Step {step_idx}: {action.get('action_type', 'unknown')} "
             f"(block {action.get('conflict_id', '-')})"
         )
 
