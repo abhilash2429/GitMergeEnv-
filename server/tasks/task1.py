@@ -99,12 +99,14 @@ def process_user(user_info, config, timeout=30):
         ">>>>>>>",
         "transform(user_data)",
     ],
+
+    # Grader weight breakdown — must sum to 1.0
     "grader_weights": {
-        "parses_cleanly": 0.15,
-        "no_conflict_markers": 0.10,
-        "block_match": 0.40,
-        "required_elements": 0.25,
-        "structural_similarity": 0.10,
+        "no_conflict_markers": 0.15,
+        "block_match": 0.55,
+        "required_elements": 0.30,
     },
+
+    # Baseline expected score range for a GPT-4 level agent
     "expected_baseline_score": (0.75, 0.95),
 }

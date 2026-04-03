@@ -273,13 +273,14 @@ Base.metadata.create_all(engine)''',
             "weight": 0.15,
         }
     ],
+
     "grader_weights": {
-        "parses_cleanly": 0.05,
-        "no_conflict_markers": 0.10,
-        "block_match": 0.35,
+        "no_conflict_markers": 0.05,
+        "block_match": 0.40,
         "required_elements": 0.25,
-        "architectural_consistency": 0.15,
-        "structural_similarity": 0.10,
+        "architectural_consistency": 0.25,
+        "indentation_consistency": 0.05,
     },
+
     "expected_baseline_score": (0.20, 0.45),
 }

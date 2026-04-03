@@ -54,3 +54,17 @@ class GitMergeEnvClient:
             response = client.post(f"{self.base_url}/grader")
             response.raise_for_status()
             return response.json()
+
+    def validate(self) -> dict:
+        """Call the /validate endpoint to run self-checks on the grader."""
+        with httpx.Client(timeout=self.timeout) as client:
+            response = client.post(f"{self.base_url}/validate")
+            response.raise_for_status()
+            return response.json()
+
+    def baseline(self) -> dict:
+        """Run the baseline agent against all tasks. Requires API credentials in env."""
+        with httpx.Client(timeout=60.0) as client:  # Longer timeout for baseline
+            response = client.post(f"{self.base_url}/baseline")
+            response.raise_for_status()
+            return response.json()

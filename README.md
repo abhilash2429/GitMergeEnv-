@@ -132,6 +132,26 @@ export HF_TOKEN=your_huggingface_token_here
 python inference.py
 ```
 
+### Development Testing with NVIDIA NIM
+```bash
+# Windows PowerShell
+$env:API_BASE_URL = "https://integrate.api.nvidia.com/v1"
+$env:NVIDIA_API_KEY = "your_nvidia_nim_key_here"
+$env:MODEL_NAME = "your_nim_model_here"
+python inference.py
+
+# Linux/Mac
+export API_BASE_URL=https://integrate.api.nvidia.com/v1
+export NVIDIA_API_KEY=your_nvidia_nim_key_here
+export MODEL_NAME=your_nim_model_here
+python inference.py
+```
+
+This uses the same OpenAI-compatible client path as Hugging Face. The default
+judge-facing Hugging Face flow remains unchanged.
+For Llama 3.3 on NIM, use `meta/llama-3.3-70b-instruct`.
+If you use `meta/llama-3_3-70b-instruct`, NIM returns `404 page not found`.
+
 ## Baseline Scores
 
 Evaluated using `meta-llama/Llama-3.3-70B-Instruct` via HuggingFace router.

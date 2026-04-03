@@ -41,6 +41,7 @@ class GitMergeEnvironment:
         self.ground_truth_file: str = ""
         self.ground_truth_blocks: list = []
         self.resolutions: dict = {}
+        self.resolve_attempts: dict = {}
         self.conflict_blocks: list = []
 
     def reset(self, task_id: str = "task1") -> MergeObservation:
@@ -121,7 +122,8 @@ class GitMergeEnvironment:
             reward, feedback, info = self._handle_submit(action)
             self.done = True
         else:
-            reward = -0.09
+            # Unknown action type — negative reward, episode continues
+            reward = -0.10
             feedback = (
                 f"Unknown action_type '{action.action_type}'. "
                 f"Must be one of: inspect, resolve, submit. "
@@ -201,27 +203,24 @@ class GitMergeEnvironment:
                 f"Valid range: 0 to {len(self.conflict_blocks) - 1}."
             ), {"error": "conflict_id_out_of_range"}
 
-        if len(action.resolution.strip()) < 5:
-            return -0.08, "Resolution is too short to be valid code.", {"error": "resolution_too_short"}
+        # Track repeated resolve attempts per block and reduce reward for
+        # repair loops that fail to make real progress.
+        attempt_num = self.resolve_attempts.get(action.conflict_id, 0) + 1
+        self.resolve_attempts[action.conflict_id] = attempt_num
 
-        if any(marker in action.resolution for marker in ["<<<<<<<", "=======", ">>>>>>>"]):
-            return -0.10, "Resolution contains git conflict markers. Submit clean code only.", {
-                "error": "resolution_contains_markers"
-            }
+        if attempt_num == 2:
+            repetition_multiplier = 0.7
+        elif attempt_num >= 3:
+            repetition_multiplier = 0.4
+        else:
+            repetition_multiplier = 1.0
 
-        if action.conflict_id < len(self.ground_truth_blocks):
-            gt_len = len(self.ground_truth_blocks[action.conflict_id])
-            if len(action.resolution) > gt_len * 10:
-                return -0.05, "Resolution is unusually long. Keep it focused on the conflict.", {
-                    "error": "resolution_too_long"
-                }
-
-        if action.conflict_id in self.resolutions:
-            prev_resolution = self.resolutions[action.conflict_id]
-            if prev_resolution.strip() == action.resolution.strip():
-                return -0.05, (
-                    f"Block {action.conflict_id} already resolved with identical content. No change made."
-                ), {"error": "duplicate_resolution"}
+        # Check for conflict markers in the resolution itself — invalid
+        if any(m in action.resolution for m in ["<<<<<<<", "=======", ">>>>>>>"]):
+            return -0.10, (
+                "Resolution contains git conflict markers. "
+                "Your resolution must be clean code, not a conflict block."
+            ), {"error": "resolution_contains_markers"}
 
         grader = ConflictGrader()
 
@@ -250,6 +249,18 @@ class GitMergeEnvironment:
             reward = -0.08
             quality = "INCORRECT"
 
+        syntax_ok = True
+        if len(self.resolutions) == len(self.conflict_blocks):
+            try:
+                import ast
+
+                ast.parse(self.current_file)
+            except SyntaxError:
+                syntax_ok = False
+
+        if not syntax_ok and reward > 0:
+            reward = reward * 0.3
+
         unresolved = [index for index in range(len(self.conflict_blocks)) if index not in self.resolutions]
         feedback = (
             f"Block {action.conflict_id} resolved. "
@@ -257,6 +268,16 @@ class GitMergeEnvironment:
             f"Resolved: {len(self.resolutions)}/{len(self.conflict_blocks)}. "
             f"Unresolved blocks: {unresolved}."
         )
+
+        if not syntax_ok:
+            feedback += " WARNING: current merged file has a syntax error. Review your indentation."
+
+        reward = reward * repetition_multiplier
+        if attempt_num > 1:
+            feedback += (
+                f" (attempt {attempt_num} on block {action.conflict_id} — "
+                "diminishing returns apply)"
+            )
 
         return reward, feedback, {
             "resolved_block": action.conflict_id,
@@ -284,13 +305,27 @@ class GitMergeEnvironment:
 
         terminal_reward = final_score - unresolved_penalty + efficiency_bonus + consistency_bonus
 
+        if not grader._parses_cleanly(self.current_file):
+            score_explanation = (
+                "LOW SCORE REASON: merged file has a syntax error. "
+                "Review indentation in your resolutions."
+            )
+        elif final_score < 0.3 and len(self.resolutions) == len(self.conflict_blocks):
+            score_explanation = (
+                "LOW SCORE REASON: all blocks resolved but content does not "
+                "match ground truth patterns."
+            )
+        else:
+            score_explanation = ""
+
         feedback = (
             f"Episode complete. Final score: {final_score:.4f}. "
+            f"{score_explanation} "
             f"Unresolved penalty: -{unresolved_penalty:.2f}. "
             f"Efficiency bonus: +{efficiency_bonus:.2f}. "
             f"Consistency bonus: +{consistency_bonus:.2f}. "
             f"Terminal reward: {terminal_reward:.4f}. "
-            f"Score components: {components}."
+            f"Components: {components}."
         )
 
         return round(terminal_reward, 4), feedback, {
@@ -380,17 +415,6 @@ class GitMergeEnvironment:
             if index not in self.resolutions
         ]
 
-        hint = ""
-        if self.task and self.step_count > (self.task["max_steps"] * 0.5):
-            unresolved_count = len(self.conflict_blocks) - len(self.resolutions)
-            if unresolved_count > 0:
-                hint = (
-                    f"Hint: You have used over half your steps. "
-                    f"{unresolved_count} conflict(s) remain unresolved. "
-                    f"Use 'resolve' action to submit your resolution for each unresolved block, "
-                    f"then call 'submit' when all blocks are done."
-                )
-
         return MergeObservation(
             file_name=self.task["file_name"] if self.task else "unknown",
             total_conflicts=len(self.conflict_blocks),
@@ -400,5 +424,4 @@ class GitMergeEnvironment:
             last_action_feedback=feedback,
             last_reward=round(last_reward, 4),
             steps_remaining=steps_remaining or 0,
-            hint=hint or None,
         )

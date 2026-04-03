@@ -87,11 +87,7 @@ async def step(action: MergeAction, env: GitMergeEnvironment = Depends(get_env))
         obs, reward, done, info = env.step(action)
         return StepResult(
             observation=obs,
-            reward=MergeReward(
-                value=reward,
-                components=info,
-                cumulative=round(env.total_reward, 4),
-            ),
+            reward=reward,
             done=done,
             info=info,
         )
@@ -107,11 +103,7 @@ async def step(action: MergeAction, env: GitMergeEnvironment = Depends(get_env))
                 last_reward=-0.10,
                 steps_remaining=0,
             ),
-            reward=MergeReward(
-                value=-0.10,
-                components={"error": str(exc)},
-                cumulative=0.0,
-            ),
+            reward=-0.10,
             done=False,
             info={"error": str(exc)},
         )
@@ -230,10 +222,10 @@ async def validate():
 @app.post("/baseline", response_model=BaselineResult, tags=["openenv"])
 async def baseline():
     try:
-        if not (os.getenv("HF_TOKEN") or os.getenv("API_KEY")):
+        if not (os.getenv("HF_TOKEN") or os.getenv("API_KEY") or os.getenv("NVIDIA_API_KEY")):
             raise HTTPException(
                 status_code=400,
-                detail="HF_TOKEN environment variable not set."
+                detail="HF_TOKEN, API_KEY, or NVIDIA_API_KEY environment variable not set."
             )
 
         from inference import run_baseline

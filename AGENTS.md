@@ -1,2290 +1,916 @@
-# AGENTS.md — GitMergeEnv: Complete Build Specification
+# AGENTS.md - GitMergeEnv Current Codebase Guide
 
-## Prime Directive
+This document is the current-state guide for AI agents working on this repository.
+It is not the old "build this from scratch" spec. Treat the codebase itself as the
+source of truth, and use this file as the map that explains how the pieces fit.
 
-You are building a production-ready OpenEnv environment called **GitMergeEnv**.
-This is a real-world RL training environment where an AI agent learns to resolve
-git merge conflicts in Python source files.
+If you are an agent editing this repo, read this file before making changes.
 
-Read this entire document before writing a single line of code.
-Follow every instruction exactly. Do not improvise architecture.
-Do not add features not specified here.
-Do not simplify anything marked as required.
+## 1. Project Identity
 
----
+GitMergeEnv is an OpenEnv-style FastAPI environment where an agent resolves git
+merge conflicts in Python files.
 
-## What You Are Building
+The environment is:
+- backend-only
+- stateful per running process, but not persistent across restarts
+- deterministic on the environment/grader side
+- self-contained, with no database and no external APIs inside the environment
 
-A FastAPI web server, containerized via Docker, deployable to Hugging Face Spaces,
-that implements the OpenEnv spec. The environment presents an agent with a Python
-file containing git merge conflict markers. The agent resolves conflicts step by
-step and is scored deterministically against a ground truth resolution.
+The only external model/API usage is in `inference.py`, which is the baseline
+agent runner and not part of the environment's deterministic grader logic.
 
-This is a backend service only. No frontend. No database. No external APIs.
-Everything is self-contained and stateless between episodes.
+## 2. Prime Directives
 
----
+When changing this repo, preserve these invariants unless the user explicitly
+asks to break them:
 
-## Final Project Structure
+1. Do not change the core task scenarios casually.
+   The conflicted files, ground truths, required elements, forbidden elements,
+   and task difficulty progression are the benchmark itself.
 
-Reproduce this structure exactly. Every file listed must exist.
+2. Keep grading deterministic.
+   No randomness, no LLM calls, no network calls, no clock-based scoring logic
+   in `server/grader.py`.
 
-```
-git_merge_env/
-├── AGENTS.md                          # this file (include in repo)
-├── README.md                          # documentation (spec below)
-├── openenv.yaml                       # OpenEnv manifest (spec below)
-├── pyproject.toml                     # package config (spec below)
-├── .gitignore                         # standard Python gitignore
-├── .env.example                       # example env vars
-├── baseline.py                        # baseline inference script (spec below)
-├── models.py                          # Pydantic models (spec below)
-├── client.py                          # EnvClient subclass (spec below)
-└── server/
-    ├── __init__.py                    # empty
-    ├── app.py                         # FastAPI application (spec below)
-    ├── environment.py                 # core environment logic (spec below)
-    ├── grader.py                      # ConflictGrader class (spec below)
-    ├── requirements.txt               # server dependencies (spec below)
-    ├── Dockerfile                     # container spec (spec below)
-    └── tasks/
-        ├── __init__.py                # exports all three tasks
-        ├── task1.py                   # Easy task scenario (spec below)
-        ├── task2.py                   # Medium task scenario (spec below)
-        └── task3.py                   # Hard task scenario (spec below)
-```
+3. Keep the environment endpoint semantics stable.
+   `/reset`, `/step`, `/state`, `/tasks`, `/grader`, `/validate`, and `/baseline`
+   are part of the public environment surface.
 
----
+4. Do not remove the judge-facing Hugging Face path.
+   The primary production path is still Hugging Face router with:
+   - `API_BASE_URL`
+   - `MODEL_NAME`
+   - `HF_TOKEN`
 
-## Dependency Versions — Pin All of These
+5. NVIDIA NIM is development-only support.
+   It exists to avoid HF rate limits during local testing. Do not let NIM-specific
+   changes break the HF path.
 
-### server/requirements.txt
+6. Keep the environment parseable and deployable as a Hugging Face Docker Space.
 
-```
-fastapi==0.115.0
-uvicorn[standard]==0.30.6
-pydantic==2.8.2
-openenv-core==0.2.1
-python-dotenv==1.0.1
-httpx==0.27.2
-openai==1.40.0
-```
+## 3. Actual Repository Layout
 
-### pyproject.toml
+This is the real repo shape today.
 
-```toml
-[build-system]
-requires = ["setuptools>=68.0"]
-build-backend = "setuptools.backends.legacy:build"
-
-[project]
-name = "git_merge_env"
-version = "0.1.0"
-description = "OpenEnv environment for git merge conflict resolution"
-requires-python = ">=3.10"
-dependencies = [
-    "fastapi==0.115.0",
-    "uvicorn[standard]==0.30.6",
-    "pydantic==2.8.2",
-    "openenv-core==0.2.1",
-    "python-dotenv==1.0.1",
-    "httpx==0.27.2",
-    "openai==1.40.0",
-]
-
-[project.optional-dependencies]
-dev = ["pytest==8.3.2", "pytest-asyncio==0.23.8", "httpx==0.27.2"]
-
-[tool.setuptools.packages.find]
-where = ["."]
+```text
+GitMergeEnv/
+|- AGENTS.md
+|- README.md
+|- Rules.md
+|- openenv.yaml
+|- pyproject.toml
+|- .env.example
+|- .env
+|- .gitignore
+|- app.py
+|- client.py
+|- inference.py
+|- models.py
+|- Dockerfile
+|- __init__.py
+|- uv.lock
+|- outputs/
+|  `- .gitkeep
+`- server/
+   |- __init__.py
+   |- app.py
+   |- environment.py
+   |- grader.py
+   |- Dockerfile
+   |- requirements.txt
+   `- tasks/
+      |- __init__.py
+      |- task1.py
+      |- task2.py
+      `- task3.py
 ```
 
----
+Notes:
+- `app.py` at repo root is a compatibility shim so `uvicorn app:app` works.
+- `server/app.py` is the real FastAPI entrypoint.
+- `Dockerfile` at repo root is the main deployment Dockerfile for the root app shim.
+- `server/Dockerfile` is an alternate server-scoped container entrypoint.
+- `inference.py` is the baseline agent runner that calls the environment HTTP API.
+- `outputs/` exists but is not a core runtime dependency.
 
-## openenv.yaml
+## 4. High-Level Architecture
 
-```yaml
-name: git_merge_env
-version: "0.1.0"
-description: >
-  A real-world RL environment where an agent resolves git merge conflicts
-  in Python source files. The agent inspects conflict blocks, proposes
-  resolutions, and is scored deterministically against ground truth.
-author: "abhilash2429"
-tags:
-  - openenv
-  - software-engineering
-  - git
-  - code-review
-  - real-world
-tasks:
-  - id: task1
-    name: "Single Conflict — Variable Rename"
-    difficulty: easy
-  - id: task2
-    name: "Three Conflicts — Class Refactor"
-    difficulty: medium
-  - id: task3
-    name: "Five Conflicts — Architectural Migration"
-    difficulty: hard
-action_schema:
-  action_type:
-    type: string
-    enum: ["inspect", "resolve", "submit"]
-    required: true
-  conflict_id:
-    type: integer
-    required: false
-    description: "0-indexed conflict block ID. Required for inspect and resolve."
-  resolution:
-    type: string
-    required: false
-    description: "The resolved content for the conflict block. Required for resolve."
-observation_schema:
-  file_name: string
-  total_conflicts: integer
-  resolved_conflicts: integer
-  unresolved_conflict_ids: array
-  current_file_preview: string
-  last_action_feedback: string
-  last_reward: float
-  steps_remaining: integer
-```
+The system has four important layers:
 
----
+1. Static task definitions
+   Files: `server/tasks/task1.py`, `task2.py`, `task3.py`
 
-## models.py — Complete Implementation
+2. Environment state machine
+   File: `server/environment.py`
+
+3. Deterministic grader
+   File: `server/grader.py`
+
+4. Model-driven baseline agent
+   File: `inference.py`
+
+The request flow for a normal episode is:
+
+1. Client calls `/reset?task_id=...`
+2. `GitMergeEnvironment.reset()` loads a hardcoded task dict
+3. The current conflicted file is stored in memory
+4. Agent repeatedly calls `/step` with `inspect`, `resolve`, or `submit`
+5. The environment updates `self.resolutions`, rebuilds `current_file`, and
+   returns shaped rewards
+6. Final grading is done by `ConflictGrader.grade(current_file, task)`
+
+## 5. Public Runtime Entry Points
+
+### 5.1 `server/app.py`
+
+This is the real FastAPI app.
+
+Important implementation details:
+- Uses a FastAPI lifespan hook
+- Stores a single `GitMergeEnvironment` instance on `app.state.env`
+- Returns typed response models from `models.py`
+- `/step` is intentionally resilient and returns a negative-reward `StepResult`
+  on internal exceptions instead of propagating a 500 for action-processing errors
+
+### 5.2 `app.py`
+
+This is only a compatibility shim:
 
 ```python
-from pydantic import BaseModel, Field
-from typing import Optional, List
-
-
-class MergeAction(BaseModel):
-    """
-    Action the agent takes each step.
-
-    action_type must be one of: "inspect", "resolve", "submit"
-
-    inspect:
-        - conflict_id: required (int, 0-indexed)
-        - resolution: not used
-        - Effect: returns detailed context for that conflict block
-        - Reward: +0.02 (small positive for information gathering)
-
-    resolve:
-        - conflict_id: required (int, 0-indexed)
-        - resolution: required (str, the resolved content)
-        - Effect: records the resolution for that block, computes immediate reward
-        - Reward: +0.15 exact match, +0.05 partial, -0.02 wrong, -0.08 garbage
-
-    submit:
-        - conflict_id: not used
-        - resolution: not used
-        - Effect: finalizes the episode, runs terminal grader, sets done=True
-        - Reward: full grader score minus unresolved penalty minus step waste penalty
-    """
-    action_type: str = Field(..., description="One of: inspect, resolve, submit")
-    conflict_id: Optional[int] = Field(None, description="0-indexed conflict block ID")
-    resolution: Optional[str] = Field(None, description="Resolved content for the block")
-
-
-class MergeObservation(BaseModel):
-    """
-    Observation returned to the agent after every step and reset.
-    """
-    file_name: str = Field(..., description="Name of the file being merged")
-    total_conflicts: int = Field(..., description="Total number of conflict blocks in file")
-    resolved_conflicts: int = Field(..., description="How many blocks the agent has resolved")
-    unresolved_conflict_ids: List[int] = Field(..., description="Block IDs not yet resolved")
-    current_file_preview: str = Field(..., description="File content with resolutions applied so far")
-    last_action_feedback: str = Field(..., description="Human-readable feedback on last action")
-    last_reward: float = Field(..., description="Reward received for the last action")
-    steps_remaining: int = Field(..., description="Steps left before forced episode termination")
-
-
-class MergeReward(BaseModel):
-    """
-    Reward model returned alongside observation.
-    """
-    value: float = Field(..., description="Reward value for the last action")
-    components: dict = Field(..., description="Breakdown of reward components")
-    cumulative: float = Field(..., description="Total reward accumulated this episode")
-
-
-class StepResult(BaseModel):
-    """
-    Full result returned by /step endpoint.
-    """
-    observation: MergeObservation
-    reward: float
-    done: bool
-    info: dict
-
-
-class EpisodeState(BaseModel):
-    """
-    Returned by /state endpoint.
-    """
-    episode_id: str
-    task_id: str
-    step_count: int
-    max_steps: int
-    done: bool
-    total_reward: float
-    resolved_conflicts: int
-    total_conflicts: int
-
-
-class TaskInfo(BaseModel):
-    """
-    Returned by /tasks endpoint for each task.
-    """
-    id: str
-    name: str
-    difficulty: str
-    description: str
-    max_steps: int
-    num_conflicts: int
-    action_schema: dict
-
-
-class GraderResult(BaseModel):
-    """
-    Returned by /grader endpoint.
-    """
-    task_id: str
-    score: float
-    components: dict
-    feedback: str
-
-
-class BaselineResult(BaseModel):
-    """
-    Returned by /baseline endpoint.
-    """
-    task_scores: dict
-    average_score: float
-    model_used: str
+from server.app import app, main
 ```
 
----
+It exists so both of these work:
+- `uvicorn app:app`
+- `python app.py`
 
-## server/tasks/task1.py — Easy Task
+### 5.3 `inference.py`
 
-This file defines Task 1 as a Python dictionary. Hardcoded. No generation.
+This is the baseline runner and debugging harness. It is not the environment.
 
-```python
-"""
-Task 1 — Easy: Single Variable Rename Conflict
+It:
+- calls the environment HTTP endpoints
+- talks to an OpenAI-compatible model API
+- runs all three tasks in sequence
+- prints task-level scores
 
-Scenario:
-  Developer A renamed variable 'user_data' to 'user_info' throughout a function.
-  Developer B added a 'timeout' parameter to the same function using the old name.
-  Git produced one conflict block. Agent must synthesize both changes.
+## 6. Environment Variables
 
-Correct resolution:
-  Use Developer A's new name (user_info) AND include Developer B's new parameter (timeout=30).
-  This tests whether the agent understands it must merge both changes, not pick one side.
+### 6.1 Judge-facing / production path
 
-Ground truth required elements:
-  - "user_info" must appear (A's rename)
-  - "timeout=30" must appear (B's new param)
-  - "transform(user_info)" must appear (consistent naming)
-  - No conflict markers must remain
-  - File must parse with ast.parse()
-"""
+The intended judge path is:
+- `API_BASE_URL`
+- `MODEL_NAME`
+- `HF_TOKEN`
 
-TASK1 = {
-    "id": "task1",
-    "name": "Single Conflict — Variable Rename",
-    "difficulty": "easy",
-    "description": (
-        "Two developers modified the same Python function. Developer A renamed "
-        "the parameter 'user_data' to 'user_info' for consistency. Developer B "
-        "added a new 'timeout' parameter to the function. Git cannot auto-resolve "
-        "this. Your task is to merge both changes correctly into a single coherent "
-        "function definition."
-    ),
-    "file_name": "processor.py",
-    "max_steps": 6,
-    "num_conflicts": 1,
+`.env.example` is intentionally minimal and keeps the default model on the
+Hugging Face router:
 
-    # The raw conflicted file content exactly as git would produce it
-    "conflicted_file": '''\
-import logging
-
-logger = logging.getLogger(__name__)
-
-
-<<<<<<< HEAD
-def process_user(user_info, config):
-    """Process a user record with the given config."""
-    logger.debug("Processing user")
-    result = transform(user_info)
-    validated = validate(result, config)
-    return validated
-=======
-def process_user(user_data, config, timeout=30):
-    """Process a user record with the given config."""
-    logger.debug("Processing user")
-    result = transform(user_data)
-    validated = validate(result, config)
-    return validated
->>>>>>> feature/add-timeout
-
-
-def validate(data, config):
-    if not data:
-        raise ValueError("Empty data")
-    return data
-''',
-
-    # The single correct resolution — what the merged file should look like
-    "ground_truth_file": '''\
-import logging
-
-logger = logging.getLogger(__name__)
-
-
-def process_user(user_info, config, timeout=30):
-    """Process a user record with the given config."""
-    logger.debug("Processing user")
-    result = transform(user_info)
-    validated = validate(result, config)
-    return validated
-
-
-def validate(data, config):
-    if not data:
-        raise ValueError("Empty data")
-    return data
-''',
-
-    # Ground truth per conflict block (0-indexed list, one entry per conflict)
-    "ground_truth_blocks": [
-        '''\
-def process_user(user_info, config, timeout=30):
-    """Process a user record with the given config."""
-    logger.debug("Processing user")
-    result = transform(user_info)
-    validated = validate(result, config)
-    return validated'''
-    ],
-
-    # Required string elements that MUST appear in the correct final resolution
-    # Used by grader semantic component
-    "required_elements": [
-        "user_info",
-        "timeout=30",
-        "transform(user_info)",
-    ],
-
-    # Elements that must NOT appear — degenerate/wrong resolutions
-    "forbidden_elements": [
-        "<<<<<<<",
-        "=======",
-        ">>>>>>>",
-        "transform(user_data)",   # old name, wrong
-    ],
-
-    # Grader weight breakdown — must sum to 1.0
-    "grader_weights": {
-        "parses_cleanly": 0.15,
-        "no_conflict_markers": 0.10,
-        "block_match": 0.50,
-        "required_elements": 0.25,
-    },
-
-    # Baseline expected score range for a GPT-4 level agent
-    "expected_baseline_score": (0.75, 0.95),
-}
-```
-
----
-
-## server/tasks/task2.py — Medium Task
-
-```python
-"""
-Task 2 — Medium: Three Conflicts in a Class
-
-Scenario:
-  Developer A refactored exception handling to use custom exceptions.
-  Developer B added structured logging throughout the same class.
-  Three conflict blocks result across imports, method body, and docstring.
-
-  Conflict 0 (imports): A added CustomError import, B added logging import.
-    Correct: include BOTH imports.
-
-  Conflict 1 (method body): A changed raise ValueError to raise CustomError,
-    B added logger.warning call before the raise.
-    Correct: keep logger.warning AND use CustomError (not ValueError).
-
-  Conflict 2 (docstring): A documented the new exception, B documented logging.
-    Correct: mention BOTH in the docstring.
-
-This tests whether the agent can handle multiple independent conflicts
-without letting resolutions of early conflicts pollute later ones.
-"""
-
-TASK2 = {
-    "id": "task2",
-    "name": "Three Conflicts — Class Refactor",
-    "difficulty": "medium",
-    "description": (
-        "Two developers modified the same Python class simultaneously. "
-        "Developer A refactored all exception handling to use a custom "
-        "exception class. Developer B added structured logging throughout "
-        "the class. Three conflict blocks were produced across the imports "
-        "section, a method body, and the class docstring. "
-        "You must resolve all three conflicts, preserving both developers' "
-        "changes where they are compatible."
-    ),
-    "file_name": "data_service.py",
-    "max_steps": 12,
-    "num_conflicts": 3,
-
-    "conflicted_file": '''\
-<<<<<<< HEAD
-from exceptions import CustomError, ValidationError
-=======
-import logging
-from exceptions import ValidationError
-
-logger = logging.getLogger(__name__)
->>>>>>> feature/add-logging
-
-
-class DataService:
-<<<<<<< HEAD
-    """
-    Service for processing data records.
-    Raises CustomError on invalid input.
-    Uses ValidationError for schema violations.
-    """
-=======
-    """
-    Service for processing data records.
-    All operations are logged at WARNING level on failure.
-    Uses structured logging with context fields.
-    """
->>>>>>> feature/add-logging
-
-    def __init__(self, config):
-        self.config = config
-        self._cache = {}
-
-    def process(self, record):
-        if not record:
-<<<<<<< HEAD
-            raise CustomError("Record cannot be empty", code=400)
-=======
-            logger.warning("process() called with empty record", extra={"config": self.config})
-            raise ValueError("Record cannot be empty")
->>>>>>> feature/add-logging
-        return self._transform(record)
-
-    def _transform(self, record):
-        return {k: v for k, v in record.items() if v is not None}
-''',
-
-    "ground_truth_file": '''\
-from exceptions import CustomError, ValidationError
-import logging
-
-logger = logging.getLogger(__name__)
-
-
-class DataService:
-    """
-    Service for processing data records.
-    Raises CustomError on invalid input.
-    Uses ValidationError for schema violations.
-    All operations are logged at WARNING level on failure.
-    Uses structured logging with context fields.
-    """
-
-    def __init__(self, config):
-        self.config = config
-        self._cache = {}
-
-    def process(self, record):
-        if not record:
-            logger.warning("process() called with empty record", extra={"config": self.config})
-            raise CustomError("Record cannot be empty", code=400)
-        return self._transform(record)
-
-    def _transform(self, record):
-        return {k: v for k, v in record.items() if v is not None}
-''',
-
-    "ground_truth_blocks": [
-        # Block 0: imports
-        '''\
-from exceptions import CustomError, ValidationError
-import logging
-
-logger = logging.getLogger(__name__)''',
-
-        # Block 1: docstring
-        '''\
-    """
-    Service for processing data records.
-    Raises CustomError on invalid input.
-    Uses ValidationError for schema violations.
-    All operations are logged at WARNING level on failure.
-    Uses structured logging with context fields.
-    """''',
-
-        # Block 2: method body
-        '''\
-            logger.warning("process() called with empty record", extra={"config": self.config})
-            raise CustomError("Record cannot be empty", code=400)''',
-    ],
-
-    "required_elements": [
-        "CustomError",
-        "import logging",
-        "logger = logging.getLogger",
-        "logger.warning",
-        "raise CustomError",
-        "code=400",
-    ],
-
-    "forbidden_elements": [
-        "<<<<<<<",
-        "=======",
-        ">>>>>>>",
-        "raise ValueError",      # wrong — must use CustomError
-    ],
-
-    "grader_weights": {
-        "parses_cleanly": 0.10,
-        "no_conflict_markers": 0.10,
-        "block_match": 0.50,     # 3 blocks, ~0.167 each
-        "required_elements": 0.30,
-    },
-
-    "expected_baseline_score": (0.45, 0.70),
-}
-```
-
----
-
-## server/tasks/task3.py — Hard Task
-
-```python
-"""
-Task 3 — Hard: Five Conflicts — Architectural Migration
-
-Scenario:
-  Developer A migrated the data access layer from raw sqlite3 to SQLAlchemy ORM.
-  Developer B added three new query features using the old raw sqlite3 pattern.
-  Five conflict blocks result.
-
-  CRITICAL DEPENDENCY: The conflicts are NOT independently resolvable.
-  Conflict 0 establishes which approach wins (ORM must win — it's a breaking migration).
-  Conflicts 1-4 must ALL be resolved consistently with the ORM approach.
-
-  An agent that resolves each block independently without tracking architectural
-  consistency will produce a logically broken file — mixing ORM and raw SQL.
-  This is what separates agents that reason holistically from those that don't.
-
-  Correct approach: SQLAlchemy ORM wins across all five blocks.
-  Developer B's new features must be re-implemented using ORM syntax.
-
-Block summary:
-  Conflict 0: imports — raw sqlite3 vs sqlalchemy imports. ORM wins.
-  Conflict 1: connection setup — sqlite3.connect() vs Session(). ORM wins.
-  Conflict 2: basic query — cursor.execute() vs session.query(). ORM wins.
-  Conflict 3: new feature (B added) — cursor-based insert. Must convert to ORM.
-  Conflict 4: new feature (B added) — cursor-based delete. Must convert to ORM.
-"""
-
-TASK3 = {
-    "id": "task3",
-    "name": "Five Conflicts — Architectural Migration",
-    "difficulty": "hard",
-    "description": (
-        "Two developers modified the same database access module simultaneously. "
-        "Developer A completed a full migration from raw sqlite3 to SQLAlchemy ORM. "
-        "Developer B, unaware of the migration, added two new features using the old "
-        "raw sqlite3 pattern. Five conflict blocks were produced. "
-        "The conflicts are architecturally dependent — you must resolve all five "
-        "consistently using the SQLAlchemy ORM approach. Developer B's new features "
-        "must be re-implemented using ORM syntax, not carried over as-is. "
-        "Mixing ORM and raw SQL in the final file is considered a failed resolution."
-    ),
-    "file_name": "db_access.py",
-    "max_steps": 18,
-    "num_conflicts": 5,
-
-    "conflicted_file": '''\
-<<<<<<< HEAD
-from sqlalchemy import create_engine, Column, Integer, String, select, delete
-from sqlalchemy.orm import DeclarativeBase, Session
-
-class Base(DeclarativeBase):
-    pass
-
-class User(Base):
-    __tablename__ = "users"
-    id = Column(Integer, primary_key=True)
-    name = Column(String)
-    email = Column(String)
-    role = Column(String, default="user")
-
-engine = create_engine("sqlite:///app.db")
-Base.metadata.create_all(engine)
-=======
-import sqlite3
-
-DB_PATH = "app.db"
-
-def get_connection():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
->>>>>>> feature/new-queries
-
-
-def get_user_by_id(user_id: int):
-<<<<<<< HEAD
-    with Session(engine) as session:
-        return session.get(User, user_id)
-=======
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
-    return cursor.fetchone()
->>>>>>> feature/new-queries
-
-
-def get_all_users():
-<<<<<<< HEAD
-    with Session(engine) as session:
-        return session.execute(select(User)).scalars().all()
-=======
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM users")
-    return cursor.fetchall()
->>>>>>> feature/new-queries
-
-
-def create_user(name: str, email: str, role: str = "user"):
-<<<<<<< HEAD
-    with Session(engine) as session:
-        user = User(name=name, email=email, role=role)
-        session.add(user)
-        session.commit()
-        session.refresh(user)
-        return user
-=======
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        "INSERT INTO users (name, email, role) VALUES (?, ?, ?)",
-        (name, email, role)
-    )
-    conn.commit()
-    return cursor.lastrowid
->>>>>>> feature/new-queries
-
-
-def delete_user(user_id: int):
-<<<<<<< HEAD
-    with Session(engine) as session:
-        user = session.get(User, user_id)
-        if user:
-            session.delete(user)
-            session.commit()
-            return True
-        return False
-=======
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM users WHERE id = ?", (user_id,))
-    conn.commit()
-    return cursor.rowcount > 0
->>>>>>> feature/new-queries
-''',
-
-    "ground_truth_file": '''\
-from sqlalchemy import create_engine, Column, Integer, String, select, delete
-from sqlalchemy.orm import DeclarativeBase, Session
-
-class Base(DeclarativeBase):
-    pass
-
-class User(Base):
-    __tablename__ = "users"
-    id = Column(Integer, primary_key=True)
-    name = Column(String)
-    email = Column(String)
-    role = Column(String, default="user")
-
-engine = create_engine("sqlite:///app.db")
-Base.metadata.create_all(engine)
-
-
-def get_user_by_id(user_id: int):
-    with Session(engine) as session:
-        return session.get(User, user_id)
-
-
-def get_all_users():
-    with Session(engine) as session:
-        return session.execute(select(User)).scalars().all()
-
-
-def create_user(name: str, email: str, role: str = "user"):
-    with Session(engine) as session:
-        user = User(name=name, email=email, role=role)
-        session.add(user)
-        session.commit()
-        session.refresh(user)
-        return user
-
-
-def delete_user(user_id: int):
-    with Session(engine) as session:
-        user = session.get(User, user_id)
-        if user:
-            session.delete(user)
-            session.commit()
-            return True
-        return False
-''',
-
-    "ground_truth_blocks": [
-        # Block 0: imports and setup
-        '''\
-from sqlalchemy import create_engine, Column, Integer, String, select, delete
-from sqlalchemy.orm import DeclarativeBase, Session
-
-class Base(DeclarativeBase):
-    pass
-
-class User(Base):
-    __tablename__ = "users"
-    id = Column(Integer, primary_key=True)
-    name = Column(String)
-    email = Column(String)
-    role = Column(String, default="user")
-
-engine = create_engine("sqlite:///app.db")
-Base.metadata.create_all(engine)''',
-
-        # Block 1: get_user_by_id
-        '''\
-    with Session(engine) as session:
-        return session.get(User, user_id)''',
-
-        # Block 2: get_all_users
-        '''\
-    with Session(engine) as session:
-        return session.execute(select(User)).scalars().all()''',
-
-        # Block 3: create_user
-        '''\
-    with Session(engine) as session:
-        user = User(name=name, email=email, role=role)
-        session.add(user)
-        session.commit()
-        session.refresh(user)
-        return user''',
-
-        # Block 4: delete_user
-        '''\
-    with Session(engine) as session:
-        user = session.get(User, user_id)
-        if user:
-            session.delete(user)
-            session.commit()
-            return True
-        return False''',
-    ],
-
-    "required_elements": [
-        "from sqlalchemy",
-        "Session(engine)",
-        "session.get(User",
-        "session.add(",
-        "session.commit()",
-        "session.delete(",
-        "select(User)",
-    ],
-
-    "forbidden_elements": [
-        "<<<<<<<",
-        "=======",
-        ">>>>>>>",
-        "import sqlite3",           # old approach must not survive
-        "sqlite3.connect",          # old approach
-        "cursor.execute",           # old approach
-        "conn.commit()",            # old approach
-        "get_connection()",         # old helper must not survive
-    ],
-
-    # Architectural consistency check: these pairs must co-exist in final file
-    # If ORM imports exist but cursor.execute also exists, that's a failed merge
-    "consistency_checks": [
-        {
-            "must_have": "Session(engine)",
-            "must_not_have": "cursor.execute",
-            "label": "orm_consistency",
-            "weight": 0.15,
-        }
-    ],
-
-    "grader_weights": {
-        "parses_cleanly": 0.05,
-        "no_conflict_markers": 0.05,
-        "block_match": 0.50,        # 5 blocks, 0.10 each
-        "required_elements": 0.25,
-        "architectural_consistency": 0.15,
-    },
-
-    "expected_baseline_score": (0.20, 0.45),
-}
-```
-
----
-
-## server/tasks/__init__.py
-
-```python
-from server.tasks.task1 import TASK1
-from server.tasks.task2 import TASK2
-from server.tasks.task3 import TASK3
-
-ALL_TASKS = {
-    "task1": TASK1,
-    "task2": TASK2,
-    "task3": TASK3,
-}
-
-TASK_LIST = [TASK1, TASK2, TASK3]
-```
-
----
-
-## server/grader.py — Complete Implementation
-
-This is the most critical file. Implement exactly as specified.
-Every function must be deterministic — same inputs always return same output.
-No randomness. No LLM calls. No external API calls.
-
-```python
-import ast
-import re
-from typing import Dict, Tuple
-
-
-class ConflictGrader:
-    """
-    Deterministic grader for git merge conflict resolution.
-
-    Scores are always floats in [0.0, 1.0].
-    Same inputs always produce same output.
-    No LLMs, no randomness, no external calls.
-    """
-
-    CONFLICT_START = "<<<<<<<\n"  # simplified marker pattern
-    CONFLICT_SEP = "======="
-    CONFLICT_END = ">>>>>>>"
-
-    def grade(self, agent_file: str, task: dict) -> Tuple[float, Dict]:
-        """
-        Master grader. Returns (score, components_dict).
-
-        Score breakdown per task grader_weights field.
-        Components dict has one key per weight component with its score.
-        """
-        weights = task["grader_weights"]
-        components = {}
-
-        # Component: file parses cleanly
-        parses = self._parses_cleanly(agent_file)
-        components["parses_cleanly"] = 1.0 if parses else 0.0
-
-        # If file doesn't parse, cap total at 0.15 max
-        # A broken file is nearly useless even with good content
-        if not parses:
-            total = weights.get("parses_cleanly", 0.15) * components["parses_cleanly"]
-            return round(min(total, 0.15), 4), components
-
-        # Component: no conflict markers remaining
-        has_markers = self._has_conflict_markers(agent_file)
-        components["no_conflict_markers"] = 0.0 if has_markers else 1.0
-
-        # Component: block-level match
-        block_score = self._score_blocks(agent_file, task)
-        components["block_match"] = round(block_score, 4)
-
-        # Component: required elements present
-        req_score = self._score_required_elements(agent_file, task)
-        components["required_elements"] = round(req_score, 4)
-
-        # Component: architectural consistency (task3 only)
-        if "consistency_checks" in task:
-            consistency_score = self._score_consistency(agent_file, task)
-            components["architectural_consistency"] = round(consistency_score, 4)
-        elif "architectural_consistency" in weights:
-            components["architectural_consistency"] = 1.0
-
-        # Forbidden elements penalty — applied multiplicatively
-        forbidden_penalty = self._compute_forbidden_penalty(agent_file, task)
-        components["forbidden_penalty"] = round(forbidden_penalty, 4)
-
-        # Weighted sum
-        total = 0.0
-        for component_name, weight in weights.items():
-            component_score = components.get(component_name, 0.0)
-            total += weight * component_score
-
-        # Apply forbidden penalty (multiplicative, not additive)
-        total = total * forbidden_penalty
-
-        return round(min(max(total, 0.0), 1.0), 4), components
-
-    def grade_block(self, agent_block: str, ground_truth_block: str) -> float:
-        """
-        Score a single resolved block against ground truth.
-        Used for immediate per-step feedback inside step().
-
-        Returns:
-          1.0  — exact match (whitespace normalized)
-          0.5-0.9 — high token overlap (good but not perfect)
-          0.1-0.49 — partial token overlap
-          0.0  — no meaningful overlap
-        """
-        agent_normalized = self._normalize_whitespace(agent_block)
-        truth_normalized = self._normalize_whitespace(ground_truth_block)
-
-        # Exact match after normalization
-        if agent_normalized == truth_normalized:
-            return 1.0
-
-        # Token overlap (Jaccard-like)
-        agent_tokens = set(re.findall(r'\w+|[^\w\s]', agent_normalized))
-        truth_tokens = set(re.findall(r'\w+|[^\w\s]', truth_normalized))
-
-        if not truth_tokens:
-            return 0.0
-
-        intersection = agent_tokens & truth_tokens
-        union = agent_tokens | truth_tokens
-        jaccard = len(intersection) / len(union)
-
-        # Scale: jaccard of 1.0 = 0.9 (can't get 1.0 without exact match)
-        return round(jaccard * 0.9, 4)
-
-    def _parses_cleanly(self, code: str) -> bool:
-        """Returns True if the code parses as valid Python."""
-        try:
-            ast.parse(code)
-            return True
-        except SyntaxError:
-            return False
-
-    def _has_conflict_markers(self, code: str) -> bool:
-        """Returns True if any git conflict markers remain."""
-        markers = ["<<<<<<<", "=======", ">>>>>>>"]
-        return any(marker in code for marker in markers)
-
-    def _score_blocks(self, agent_file: str, task: dict) -> float:
-        """
-        Extract resolved blocks from agent file and compare to ground truth blocks.
-        Agent file should be fully resolved (no conflict markers).
-        We extract content at the positions where conflicts existed using
-        structural landmarks in the ground truth.
-        """
-        ground_truth_blocks = task["ground_truth_blocks"]
-        num_blocks = len(ground_truth_blocks)
-
-        if num_blocks == 0:
-            return 1.0
-
-        total_block_score = 0.0
-        per_block_weight = 1.0 / num_blocks
-
-        for gt_block in ground_truth_blocks:
-            # Check if the key identifying tokens of this block appear in agent file
-            block_score = self._check_block_presence(agent_file, gt_block)
-            total_block_score += per_block_weight * block_score
-
-        return total_block_score
-
-    def _check_block_presence(self, agent_file: str, ground_truth_block: str) -> float:
-        """
-        Check how well the ground truth block is represented in the agent file.
-        Uses token presence scoring — we check if key tokens from the block
-        appear in the agent file in the correct relative order.
-        """
-        gt_tokens = re.findall(r'\w+', ground_truth_block)
-        if not gt_tokens:
-            return 1.0
-
-        # Deduplicate while preserving order
-        seen = set()
-        unique_gt_tokens = []
-        for t in gt_tokens:
-            if t not in seen and len(t) > 2:  # skip tiny tokens like 'if', 'in'
-                seen.add(t)
-                unique_gt_tokens.append(t)
-
-        if not unique_gt_tokens:
-            return 1.0
-
-        present_count = sum(1 for t in unique_gt_tokens if t in agent_file)
-        return present_count / len(unique_gt_tokens)
-
-    def _score_required_elements(self, agent_file: str, task: dict) -> float:
-        """
-        Check what fraction of required_elements appear in the agent's file.
-        Each element is a string that must be present (substring match).
-        """
-        required = task.get("required_elements", [])
-        if not required:
-            return 1.0
-
-        present = sum(1 for el in required if el in agent_file)
-        return present / len(required)
-
-    def _score_consistency(self, agent_file: str, task: dict) -> float:
-        """
-        For task3: check architectural consistency.
-        Each consistency_check has must_have and must_not_have.
-        Score is 1.0 only if all checks pass.
-        """
-        checks = task.get("consistency_checks", [])
-        if not checks:
-            return 1.0
-
-        total_weight = sum(c["weight"] for c in checks)
-        score = 0.0
-
-        for check in checks:
-            has_required = check["must_have"] in agent_file
-            has_forbidden = check["must_not_have"] in agent_file
-            if has_required and not has_forbidden:
-                score += check["weight"]
-
-        return score / total_weight if total_weight > 0 else 1.0
-
-    def _compute_forbidden_penalty(self, agent_file: str, task: dict) -> float:
-        """
-        Multiplicative penalty for forbidden elements.
-        Each forbidden element found reduces the multiplier by 0.15.
-        Minimum multiplier is 0.1 (never zero — there may still be partial credit).
-
-        Note: conflict markers are handled by no_conflict_markers component,
-        so they are included in forbidden to apply double penalty for failing
-        to remove them.
-        """
-        forbidden = task.get("forbidden_elements", [])
-        if not forbidden:
-            return 1.0
-
-        violations = sum(1 for el in forbidden if el in agent_file)
-
-        # Each violation reduces by 0.15
-        penalty_multiplier = max(1.0 - (violations * 0.15), 0.10)
-        return penalty_multiplier
-
-    def _normalize_whitespace(self, text: str) -> str:
-        """Normalize whitespace for comparison — collapse spaces, strip lines."""
-        lines = text.strip().splitlines()
-        normalized_lines = [line.strip() for line in lines if line.strip()]
-        return "\n".join(normalized_lines)
-```
-
----
-
-## server/environment.py — Core Environment Logic
-
-```python
-import uuid
-import copy
-import re
-from typing import Optional
-from server.grader import ConflictGrader
-from server.tasks import ALL_TASKS
-from models import MergeAction, MergeObservation, EpisodeState
-
-
-CONFLICT_PATTERN = re.compile(
-    r'<<<<<<< .+?\n(.*?)=======\n(.*?)>>>>>>> .+?\n',
-    re.DOTALL
-)
-
-
-class GitMergeEnvironment:
-    """
-    Core environment implementing reset(), step(), state().
-
-    State is held in instance variables. Each call to reset()
-    wipes all state and starts a fresh episode.
-
-    Thread safety: not guaranteed. Each request should use its own instance,
-    managed by the FastAPI dependency injection in app.py.
-    """
-
-    # Per-step time penalty applied on every action regardless of type
-    STEP_PENALTY = 0.01
-
-    def __init__(self):
-        self._reset_state()
-
-    def _reset_state(self):
-        """Zero out all episode state."""
-        self.episode_id: str = ""
-        self.task_id: str = ""
-        self.task: Optional[dict] = None
-        self.step_count: int = 0
-        self.done: bool = False
-        self.total_reward: float = 0.0
-
-        # Current working copy of the file content
-        # Modified as agent resolves blocks
-        self.current_file: str = ""
-
-        # Original conflicted file (never mutated after reset)
-        self.original_file: str = ""
-
-        # Ground truth (never exposed to agent)
-        self.ground_truth_file: str = ""
-        self.ground_truth_blocks: list = []
-
-        # Track which blocks have been resolved
-        # Key: block_id (int), Value: agent's resolution string
-        self.resolutions: dict = {}
-
-        # All conflict blocks parsed from original file
-        # List of dicts: {id, head_content, incoming_content, full_marker_text}
-        self.conflict_blocks: list = []
-
-    def reset(self, task_id: str = "task1") -> MergeObservation:
-        """
-        Initialize a fresh episode for the given task.
-
-        Args:
-            task_id: one of "task1", "task2", "task3"
-
-        Returns:
-            MergeObservation with initial state.
-
-        Raises:
-            ValueError if task_id is not recognized.
-        """
-        if task_id not in ALL_TASKS:
-            raise ValueError(f"Unknown task_id '{task_id}'. Must be one of: {list(ALL_TASKS.keys())}")
-
-        self._reset_state()
-
-        self.episode_id = str(uuid.uuid4())
-        self.task_id = task_id
-        self.task = ALL_TASKS[task_id]
-
-        self.original_file = self.task["conflicted_file"]
-        self.current_file = self.original_file
-        self.ground_truth_file = self.task["ground_truth_file"]
-        self.ground_truth_blocks = self.task["ground_truth_blocks"]
-
-        self.conflict_blocks = self._parse_conflict_blocks(self.original_file)
-
-        return MergeObservation(
-            file_name=self.task["file_name"],
-            total_conflicts=len(self.conflict_blocks),
-            resolved_conflicts=0,
-            unresolved_conflict_ids=list(range(len(self.conflict_blocks))),
-            current_file_preview=self.current_file,
-            last_action_feedback=(
-                f"Episode started. File '{self.task['file_name']}' has "
-                f"{len(self.conflict_blocks)} conflict(s) to resolve. "
-                f"You have {self.task['max_steps']} steps. "
-                f"Use 'inspect' to examine a conflict, 'resolve' to fix it, "
-                f"'submit' when done."
-            ),
-            last_reward=0.0,
-            steps_remaining=self.task["max_steps"],
-        )
-
-    def step(self, action: MergeAction):
-        """
-        Process one agent action.
-
-        Returns:
-            (MergeObservation, reward, done, info)
-
-        Never raises. Invalid actions return negative reward and continue episode.
-        """
-        if self.done:
-            obs = self._build_observation("Episode already done. Call reset() to start new episode.", 0.0)
-            return obs, 0.0, True, {"error": "episode_already_done"}
-
-        if self.task is None:
-            obs = self._build_observation("No active episode. Call reset() first.", -0.1)
-            return obs, -0.1, False, {"error": "no_active_episode"}
-
-        self.step_count += 1
-        steps_remaining = self.task["max_steps"] - self.step_count
-
-        reward = 0.0
-        feedback = ""
-        info = {}
-
-        # Route to action handler
-        if action.action_type == "inspect":
-            reward, feedback, info = self._handle_inspect(action)
-
-        elif action.action_type == "resolve":
-            reward, feedback, info = self._handle_resolve(action)
-
-        elif action.action_type == "submit":
-            reward, feedback, info = self._handle_submit(action)
-            self.done = True
-
-        else:
-            # Unknown action type — negative reward, episode continues
-            reward = -0.10
-            feedback = (
-                f"Unknown action_type '{action.action_type}'. "
-                f"Must be one of: inspect, resolve, submit. "
-                f"No state change made."
-            )
-            info = {"error": "invalid_action_type"}
-
-        # Apply step penalty for every action
-        reward -= self.STEP_PENALTY
-        self.total_reward += reward
-
-        # Force termination if step limit reached
-        if steps_remaining <= 0 and not self.done:
-            self.done = True
-            feedback += " [STEP LIMIT REACHED — episode terminated]"
-            info["terminated_by_step_limit"] = True
-
-        obs = self._build_observation(feedback, reward, steps_remaining=max(steps_remaining, 0))
-        return obs, round(reward, 4), self.done, info
-
-    def state(self) -> EpisodeState:
-        """Return current episode metadata."""
-        return EpisodeState(
-            episode_id=self.episode_id,
-            task_id=self.task_id,
-            step_count=self.step_count,
-            max_steps=self.task["max_steps"] if self.task else 0,
-            done=self.done,
-            total_reward=round(self.total_reward, 4),
-            resolved_conflicts=len(self.resolutions),
-            total_conflicts=len(self.conflict_blocks),
-        )
-
-    # -------------------------------------------------------------------------
-    # Action handlers
-    # -------------------------------------------------------------------------
-
-    def _handle_inspect(self, action: MergeAction):
-        """
-        Return detailed context for a specific conflict block.
-        Small positive reward for information gathering behavior.
-        """
-        if action.conflict_id is None:
-            return -0.05, "inspect requires conflict_id to be set.", {"error": "missing_conflict_id"}
-
-        if action.conflict_id < 0 or action.conflict_id >= len(self.conflict_blocks):
-            return -0.05, (
-                f"conflict_id {action.conflict_id} out of range. "
-                f"Valid IDs: 0 to {len(self.conflict_blocks) - 1}."
-            ), {"error": "conflict_id_out_of_range"}
-
-        block = self.conflict_blocks[action.conflict_id]
-        already_resolved = action.conflict_id in self.resolutions
-
-        feedback = (
-            f"--- Conflict Block {action.conflict_id} ---\n"
-            f"Status: {'RESOLVED' if already_resolved else 'UNRESOLVED'}\n\n"
-            f"HEAD version (current branch):\n{block['head_content']}\n\n"
-            f"INCOMING version (feature branch):\n{block['incoming_content']}\n\n"
-            f"Hint: Consider what each developer was trying to achieve. "
-            f"The correct resolution may incorporate changes from both sides."
-        )
-
-        if already_resolved:
-            feedback += f"\n\nYour current resolution:\n{self.resolutions[action.conflict_id]}"
-
-        return 0.02, feedback, {"inspected_block": action.conflict_id}
-
-    def _handle_resolve(self, action: MergeAction):
-        """
-        Record the agent's resolution for one conflict block.
-        Gives immediate partial reward based on block-level grader.
-        """
-        if action.conflict_id is None:
-            return -0.05, "resolve requires conflict_id to be set.", {"error": "missing_conflict_id"}
-
-        if action.resolution is None or action.resolution.strip() == "":
-            return -0.08, "resolve requires a non-empty resolution string.", {"error": "empty_resolution"}
-
-        if action.conflict_id < 0 or action.conflict_id >= len(self.conflict_blocks):
-            return -0.05, (
-                f"conflict_id {action.conflict_id} out of range. "
-                f"Valid range: 0 to {len(self.conflict_blocks) - 1}."
-            ), {"error": "conflict_id_out_of_range"}
-
-        # Check for conflict markers in the resolution itself — invalid
-        if any(m in action.resolution for m in ["<<<<<<<", "=======", ">>>>>>>"]):
-            return -0.10, (
-                "Resolution contains git conflict markers. "
-                "Your resolution must be clean code, not a conflict block."
-            ), {"error": "resolution_contains_markers"}
-
-        grader = ConflictGrader()
-
-        # Get ground truth for this block
-        if action.conflict_id < len(self.ground_truth_blocks):
-            gt_block = self.ground_truth_blocks[action.conflict_id]
-            block_score = grader.grade_block(action.resolution, gt_block)
-        else:
-            block_score = 0.0
-
-        # Record resolution and rebuild current file
-        self.resolutions[action.conflict_id] = action.resolution
-        self.current_file = self._apply_resolutions()
-
-        # Translate block score to step reward
-        if block_score == 1.0:
-            reward = 0.15
-            quality = "PERFECT"
-        elif block_score >= 0.7:
-            reward = 0.08
-            quality = "GOOD"
-        elif block_score >= 0.4:
-            reward = 0.02
-            quality = "PARTIAL"
-        elif block_score > 0.0:
-            reward = -0.02
-            quality = "POOR"
-        else:
-            reward = -0.08
-            quality = "INCORRECT"
-
-        unresolved = [i for i in range(len(self.conflict_blocks)) if i not in self.resolutions]
-        feedback = (
-            f"Block {action.conflict_id} resolved. "
-            f"Immediate quality: {quality} (block score: {block_score:.2f}). "
-            f"Resolved: {len(self.resolutions)}/{len(self.conflict_blocks)}. "
-            f"Unresolved blocks: {unresolved}."
-        )
-
-        return reward, feedback, {
-            "resolved_block": action.conflict_id,
-            "block_score": block_score,
-            "quality": quality,
-        }
-
-    def _handle_submit(self, action: MergeAction):
-        """
-        Finalize episode. Run full grader. Compute terminal reward.
-        """
-        grader = ConflictGrader()
-        final_score, components = grader.grade(self.current_file, self.task)
-
-        # Penalty for unresolved blocks
-        unresolved_count = len(self.conflict_blocks) - len(self.resolutions)
-        unresolved_penalty = 0.10 * unresolved_count
-
-        # Bonus for submitting early if score is high
-        steps_used = self.step_count
-        max_steps = self.task["max_steps"]
-        efficiency_bonus = 0.0
-        if final_score >= 0.9 and steps_used <= (max_steps * 0.5):
-            efficiency_bonus = 0.05
-
-        terminal_reward = final_score - unresolved_penalty + efficiency_bonus
-
-        feedback = (
-            f"Episode complete. Final score: {final_score:.4f}. "
-            f"Unresolved penalty: -{unresolved_penalty:.2f}. "
-            f"Efficiency bonus: +{efficiency_bonus:.2f}. "
-            f"Terminal reward: {terminal_reward:.4f}. "
-            f"Score components: {components}."
-        )
-
-        return round(terminal_reward, 4), feedback, {
-            "final_score": final_score,
-            "components": components,
-            "unresolved_penalty": unresolved_penalty,
-            "efficiency_bonus": efficiency_bonus,
-        }
-
-    # -------------------------------------------------------------------------
-    # Helpers
-    # -------------------------------------------------------------------------
-
-    def _parse_conflict_blocks(self, file_content: str) -> list:
-        """
-        Parse all conflict blocks from a conflicted file.
-        Returns list of dicts with id, head_content, incoming_content.
-        """
-        blocks = []
-        pattern = re.compile(
-            r'<<<<<<< [^\n]+\n(.*?)=======\n(.*?)>>>>>>> [^\n]+\n',
-            re.DOTALL
-        )
-        for i, match in enumerate(pattern.finditer(file_content)):
-            blocks.append({
-                "id": i,
-                "head_content": match.group(1),
-                "incoming_content": match.group(2),
-                "full_marker_text": match.group(0),
-                "start": match.start(),
-                "end": match.end(),
-            })
-        return blocks
-
-    def _apply_resolutions(self) -> str:
-        """
-        Rebuild the file with all current resolutions applied.
-        Unresolved blocks remain as conflict markers.
-        """
-        result = self.original_file
-        # Apply in reverse order to preserve character positions
-        for block_id in sorted(self.resolutions.keys(), reverse=True):
-            if block_id < len(self.conflict_blocks):
-                block = self.conflict_blocks[block_id]
-                resolution = self.resolutions[block_id]
-                result = result.replace(block["full_marker_text"], resolution + "\n", 1)
-        return result
-
-    def _build_observation(
-        self,
-        feedback: str,
-        last_reward: float,
-        steps_remaining: Optional[int] = None,
-    ) -> MergeObservation:
-        """Build a MergeObservation from current state."""
-        if steps_remaining is None and self.task:
-            steps_remaining = max(self.task["max_steps"] - self.step_count, 0)
-
-        unresolved = [
-            i for i in range(len(self.conflict_blocks))
-            if i not in self.resolutions
-        ]
-
-        return MergeObservation(
-            file_name=self.task["file_name"] if self.task else "unknown",
-            total_conflicts=len(self.conflict_blocks),
-            resolved_conflicts=len(self.resolutions),
-            unresolved_conflict_ids=unresolved,
-            current_file_preview=self.current_file,
-            last_action_feedback=feedback,
-            last_reward=round(last_reward, 4),
-            steps_remaining=steps_remaining or 0,
-        )
-```
-
----
-
-## server/app.py — FastAPI Application
-
-```python
-import os
-import json
-from fastapi import FastAPI, HTTPException, Depends
-from fastapi.responses import JSONResponse
-from contextlib import asynccontextmanager
-from typing import Optional
-
-from models import (
-    MergeAction, MergeObservation, StepResult,
-    EpisodeState, TaskInfo, GraderResult, BaselineResult
-)
-from server.environment import GitMergeEnvironment
-from server.grader import ConflictGrader
-from server.tasks import ALL_TASKS, TASK_LIST
-
-
-# ---------------------------------------------------------------------------
-# Application factory
-# ---------------------------------------------------------------------------
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Startup and shutdown events."""
-    app.state.env = GitMergeEnvironment()
-    yield
-
-
-app = FastAPI(
-    title="GitMergeEnv",
-    description=(
-        "OpenEnv environment for git merge conflict resolution. "
-        "An AI agent resolves Python file merge conflicts step by step "
-        "and is scored deterministically against ground truth."
-    ),
-    version="0.1.0",
-    lifespan=lifespan,
-)
-
-
-# ---------------------------------------------------------------------------
-# Dependency injection
-# ---------------------------------------------------------------------------
-
-def get_env() -> GitMergeEnvironment:
-    return app.state.env
-
-
-# ---------------------------------------------------------------------------
-# Health check
-# ---------------------------------------------------------------------------
-
-@app.get("/", tags=["health"])
-async def root():
-    return {
-        "status": "ok",
-        "environment": "GitMergeEnv",
-        "version": "0.1.0",
-    }
-
-
-@app.get("/health", tags=["health"])
-async def health():
-    return {"status": "ok"}
-
-
-# ---------------------------------------------------------------------------
-# OpenEnv required endpoints
-# ---------------------------------------------------------------------------
-
-@app.post("/reset", response_model=MergeObservation, tags=["openenv"])
-async def reset(task_id: str = "task1", env: GitMergeEnvironment = Depends(get_env)):
-    """
-    Reset the environment and start a new episode.
-
-    Args:
-        task_id: which task to run ("task1", "task2", "task3")
-
-    Returns:
-        Initial MergeObservation
-    """
-    try:
-        obs = env.reset(task_id=task_id)
-        return obs
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Reset failed: {str(e)}")
-
-
-@app.post("/step", response_model=StepResult, tags=["openenv"])
-async def step(action: MergeAction, env: GitMergeEnvironment = Depends(get_env)):
-    """
-    Execute one agent action.
-
-    Returns observation, reward, done flag, and info dict.
-    Never returns 500 on invalid actions — returns negative reward instead.
-    """
-    try:
-        obs, reward, done, info = env.step(action)
-        return StepResult(
-            observation=obs,
-            reward=reward,
-            done=done,
-            info=info,
-        )
-    except Exception as e:
-        # Safety net — environment should handle all invalid inputs internally
-        # but we catch here to guarantee HTTP 200 always
-        return StepResult(
-            observation=MergeObservation(
-                file_name="unknown",
-                total_conflicts=0,
-                resolved_conflicts=0,
-                unresolved_conflict_ids=[],
-                current_file_preview="",
-                last_action_feedback=f"Internal error processing action: {str(e)}",
-                last_reward=-0.10,
-                steps_remaining=0,
-            ),
-            reward=-0.10,
-            done=False,
-            info={"error": str(e)},
-        )
-
-
-@app.get("/state", response_model=EpisodeState, tags=["openenv"])
-async def state(env: GitMergeEnvironment = Depends(get_env)):
-    """Return current episode state metadata."""
-    try:
-        return env.state()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# ---------------------------------------------------------------------------
-# Required additional endpoints
-# ---------------------------------------------------------------------------
-
-@app.get("/tasks", response_model=list[TaskInfo], tags=["openenv"])
-async def tasks():
-    """
-    Return list of all tasks with their action schema.
-    Required endpoint per OpenEnv spec.
-    """
-    action_schema = {
-        "action_type": {
-            "type": "string",
-            "enum": ["inspect", "resolve", "submit"],
-            "required": True,
-            "description": "Type of action to take",
-        },
-        "conflict_id": {
-            "type": "integer",
-            "required": False,
-            "description": "0-indexed conflict block ID. Required for inspect and resolve.",
-        },
-        "resolution": {
-            "type": "string",
-            "required": False,
-            "description": "Resolved content for the block. Required for resolve.",
-        },
-    }
-
-    return [
-        TaskInfo(
-            id=task["id"],
-            name=task["name"],
-            difficulty=task["difficulty"],
-            description=task["description"],
-            max_steps=task["max_steps"],
-            num_conflicts=task["num_conflicts"],
-            action_schema=action_schema,
-        )
-        for task in TASK_LIST
-    ]
-
-
-@app.post("/grader", response_model=GraderResult, tags=["openenv"])
-async def grader(env: GitMergeEnvironment = Depends(get_env)):
-    """
-    Score the current episode's state against ground truth.
-    Can be called at any point during an episode for intermediate feedback.
-    This does NOT end the episode.
-    """
-    if env.task is None:
-        raise HTTPException(status_code=400, detail="No active episode. Call /reset first.")
-
-    g = ConflictGrader()
-    score, components = g.grade(env.current_file, env.task)
-
-    unresolved = len(env.conflict_blocks) - len(env.resolutions)
-    feedback_parts = [f"Current score: {score:.4f}."]
-    if unresolved > 0:
-        feedback_parts.append(f"{unresolved} conflict(s) still unresolved.")
-    feedback_parts.append(f"Components: {json.dumps(components)}")
-
-    return GraderResult(
-        task_id=env.task_id,
-        score=score,
-        components=components,
-        feedback=" ".join(feedback_parts),
-    )
-
-
-@app.post("/baseline", response_model=BaselineResult, tags=["openenv"])
-async def baseline():
-    """
-    Run the baseline inference script against all 3 tasks and return scores.
-    Uses OPENAI_API_KEY from environment variables.
-    Produces reproducible scores.
-    """
-    try:
-        from baseline import run_baseline
-        scores = run_baseline()
-        avg = sum(scores.values()) / len(scores)
-        return BaselineResult(
-            task_scores=scores,
-            average_score=round(avg, 4),
-            model_used=os.getenv("BASELINE_MODEL", "gpt-4o-mini"),
-        )
-    except ImportError:
-        raise HTTPException(status_code=500, detail="baseline.py not found")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Baseline run failed: {str(e)}")
-
-
-# ---------------------------------------------------------------------------
-# Entry point for local development
-# ---------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(
-        "server.app:app",
-        host="0.0.0.0",
-        port=int(os.getenv("PORT", "7860")),
-        reload=False,
-    )
-```
-
----
-
-## baseline.py — Inference Script
-
-This runs at the repository root, not inside server/.
-It uses the OpenAI API client to run an LLM agent through all 3 tasks.
-Reads OPENAI_API_KEY from environment. Produces reproducible scores.
-
-```python
-"""
-baseline.py
-
-Baseline inference script for GitMergeEnv.
-Runs a GPT model as an agent against all 3 tasks.
-Uses the OpenAI API client with the environment's HTTP API.
-
-Usage:
-    export OPENAI_API_KEY=your_key
-    export BASE_URL=http://localhost:7860   # or your HF Space URL
-    python baseline.py
-
-Environment variables:
-    OPENAI_API_KEY   — required
-    BASE_URL         — environment URL (default: http://localhost:7860)
-    BASELINE_MODEL   — model to use (default: gpt-4o-mini)
-"""
-
-import os
-import json
-import httpx
-from openai import OpenAI
-
-BASE_URL = os.getenv("BASE_URL", "http://localhost:7860")
-MODEL = os.getenv("BASELINE_MODEL", "gpt-4o-mini")
-MAX_STEPS_OVERRIDE = 20  # safety cap
-
-
-SYSTEM_PROMPT = """\
-You are an expert software engineer resolving git merge conflicts in Python files.
-
-You will be given a Python file with git conflict markers (<<<<<<< HEAD, =======, >>>>>>>).
-Your goal is to resolve all conflicts and produce clean, working Python code.
-
-You interact with an environment through structured actions:
-
-1. inspect — examine a specific conflict block in detail
-   {"action_type": "inspect", "conflict_id": 0}
-
-2. resolve — submit your resolution for one conflict block
-   {"action_type": "resolve", "conflict_id": 0, "resolution": "your resolved code here"}
-
-3. submit — finalize when all conflicts are resolved
-   {"action_type": "submit"}
-
-Strategy:
-- Always inspect a conflict block before resolving it
-- Read both HEAD and INCOMING versions carefully
-- Understand the developer intent behind each change
-- When both sides add different features, include BOTH
-- When changes conflict architecturally, prefer the more complete refactor
-- Ensure all resolved blocks are internally consistent
-- Submit only when all conflicts are resolved
-
-Respond ONLY with a valid JSON action. No explanation. No markdown. Just JSON.
-"""
-
-
-def call_env(endpoint: str, method: str = "POST", body: dict = None) -> dict:
-    """Make HTTP request to the environment."""
-    url = f"{BASE_URL}{endpoint}"
-    with httpx.Client(timeout=30.0) as client:
-        if method == "GET":
-            response = client.get(url)
-        else:
-            response = client.post(url, json=body or {})
-    response.raise_for_status()
-    return response.json()
-
-
-def run_task(client: OpenAI, task_id: str) -> float:
-    """
-    Run one complete episode for a given task.
-    Returns the final grader score.
-    """
-    print(f"\n{'='*60}")
-    print(f"Running task: {task_id}")
-    print(f"{'='*60}")
-
-    # Reset environment
-    obs = call_env(f"/reset?task_id={task_id}")
-    print(f"Task started. File: {obs['file_name']}, Conflicts: {obs['total_conflicts']}")
-
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {
-            "role": "user",
-            "content": (
-                f"File to resolve: {obs['file_name']}\n"
-                f"Total conflicts: {obs['total_conflicts']}\n\n"
-                f"Current file state:\n\n{obs['current_file_preview']}\n\n"
-                f"{obs['last_action_feedback']}\n\n"
-                f"Begin resolving. Start by inspecting conflict 0."
-            )
-        }
-    ]
-
-    final_score = 0.0
-    steps_taken = 0
-
-    for step_num in range(MAX_STEPS_OVERRIDE):
-        # Get action from LLM
-        completion = client.chat.completions.create(
-            model=MODEL,
-            messages=messages,
-            temperature=0.0,   # deterministic
-            max_tokens=500,
-        )
-
-        raw_response = completion.choices[0].message.content.strip()
-
-        # Parse action — handle markdown fences if present
-        action_str = raw_response
-        if "```" in action_str:
-            action_str = action_str.split("```")[1]
-            if action_str.startswith("json"):
-                action_str = action_str[4:]
-            action_str = action_str.strip()
-
-        try:
-            action = json.loads(action_str)
-        except json.JSONDecodeError:
-            print(f"Step {step_num}: LLM returned invalid JSON: {raw_response[:100]}")
-            # Force inspect as recovery
-            action = {"action_type": "inspect", "conflict_id": 0}
-
-        print(f"Step {step_num}: {action.get('action_type', 'unknown')} "
-              f"(block {action.get('conflict_id', '-')})")
-
-        # Execute action
-        result = call_env("/step", body=action)
-        obs = result["observation"]
-        reward = result["reward"]
-        done = result["done"]
-        steps_taken += 1
-
-        print(f"  Reward: {reward:.4f} | Resolved: {obs['resolved_conflicts']}/{obs['total_conflicts']}")
-
-        # Add assistant response and environment feedback to conversation
-        messages.append({"role": "assistant", "content": raw_response})
-        messages.append({
-            "role": "user",
-            "content": (
-                f"Result: {obs['last_action_feedback']}\n\n"
-                f"Current file:\n\n{obs['current_file_preview']}\n\n"
-                f"Resolved: {obs['resolved_conflicts']}/{obs['total_conflicts']} conflicts.\n"
-                f"Unresolved IDs: {obs['unresolved_conflict_ids']}\n"
-                f"Steps remaining: {obs['steps_remaining']}\n\n"
-                + (
-                    "All conflicts resolved! Call submit now."
-                    if obs['resolved_conflicts'] == obs['total_conflicts'] and not done
-                    else "Continue resolving remaining conflicts or submit when ready."
-                )
-            )
-        })
-
-        if done:
-            # Extract final score from info if available
-            grader_result = call_env("/grader", method="POST")
-            final_score = grader_result["score"]
-            print(f"Episode done. Final grader score: {final_score:.4f}")
-            break
-
-    else:
-        # Hit step override limit — get grader score anyway
-        grader_result = call_env("/grader", method="POST")
-        final_score = grader_result["score"]
-        print(f"Step limit reached. Grader score: {final_score:.4f}")
-
-    return final_score
-
-
-def run_baseline() -> dict:
-    """
-    Run baseline agent against all 3 tasks.
-    Returns dict mapping task_id to score.
-    """
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise ValueError("OPENAI_API_KEY environment variable not set")
-
-    client = OpenAI(api_key=api_key)
-
-    scores = {}
-    for task_id in ["task1", "task2", "task3"]:
-        score = run_task(client, task_id)
-        scores[task_id] = round(score, 4)
-
-    print(f"\n{'='*60}")
-    print("BASELINE RESULTS")
-    print(f"{'='*60}")
-    for task_id, score in scores.items():
-        print(f"  {task_id}: {score:.4f}")
-    avg = sum(scores.values()) / len(scores)
-    print(f"  Average: {avg:.4f}")
-
-    return scores
-
-
-if __name__ == "__main__":
-    scores = run_baseline()
-```
-
----
-
-## server/Dockerfile
-
-```dockerfile
-FROM python:3.11-slim
-
-# Set working directory
-WORKDIR /app
-
-# Install system dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy requirements first for Docker cache efficiency
-COPY server/requirements.txt /app/requirements.txt
-
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy application code
-COPY models.py /app/models.py
-COPY baseline.py /app/baseline.py
-COPY server/ /app/server/
-
-# Hugging Face Spaces runs as non-root user
-RUN useradd -m -u 1000 user
-USER user
-
-# Expose port (HF Spaces uses 7860)
-EXPOSE 7860
-
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import httpx; httpx.get('http://localhost:7860/health').raise_for_status()"
-
-# Run the server
-CMD ["uvicorn", "server.app:app", "--host", "0.0.0.0", "--port", "7860", "--workers", "1"]
-```
-
----
-
-## .env.example
-
-```
-OPENAI_API_KEY=your_openai_api_key_here
+```env
+API_BASE_URL=https://router.huggingface.co/v1
+MODEL_NAME=meta-llama/Llama-3.3-70B-Instruct
+HF_TOKEN=your_huggingface_token_here
 BASE_URL=http://localhost:7860
-BASELINE_MODEL=gpt-4o-mini
 PORT=7860
 ```
 
----
-
-## README.md
-
-Write a README with exactly these sections in order:
-
-```markdown
-# GitMergeEnv
-
-> An OpenEnv environment for training AI agents to resolve git merge conflicts
-> in Python source files.
+### 6.2 Development path
 
-## Overview
-
-GitMergeEnv presents an agent with a Python file containing git merge conflict
-markers. The agent inspects conflict blocks, proposes resolutions one by one,
-and is scored deterministically against a ground truth resolution.
-
-Built for the Meta PyTorch x OpenEnv Hackathon.
+For local testing, `inference.py` and `/baseline` also accept:
+- `API_KEY`
+- `NVIDIA_API_KEY`
 
-## Motivation
-
-Git merge conflicts are one of the most universally painful experiences in
-software development. Every engineer hits them. They require understanding
-the intent behind two diverging changes and synthesizing a correct resolution
-that preserves both. This is a genuine multi-step reasoning task with
-deterministic ground truth — an ideal domain for RL agent training.
+If `API_BASE_URL` points to NVIDIA NIM (`integrate.api.nvidia.com`), the key
+priority is:
 
-## Action Space
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| action_type | string | Yes | One of: inspect, resolve, submit |
-| conflict_id | int | Conditional | Required for inspect and resolve |
-| resolution | string | Conditional | Required for resolve |
+1. `NVIDIA_API_KEY`
+2. `API_KEY`
+3. `HF_TOKEN`
 
-## Observation Space
+Otherwise the key priority is:
 
-| Field | Type | Description |
-|-------|------|-------------|
-| file_name | string | Name of the file being merged |
-| total_conflicts | int | Total conflict blocks in file |
-| resolved_conflicts | int | Blocks the agent has resolved |
-| unresolved_conflict_ids | list[int] | Block IDs not yet resolved |
-| current_file_preview | string | File with resolutions applied so far |
-| last_action_feedback | string | Feedback on last action |
-| last_reward | float | Reward from last action |
-| steps_remaining | int | Steps before forced termination |
+1. `HF_TOKEN`
+2. `API_KEY`
+3. `NVIDIA_API_KEY`
 
-## Tasks
+This exists only to make local development easier when HF rate limits are a problem.
 
-### Task 1 — Easy (max 6 steps)
-Single conflict block. Developer A renamed a variable; Developer B added a
-new parameter. Agent must synthesize both changes.
-Expected baseline score: 0.75–0.95
+## 7. API Surface
 
-### Task 2 — Medium (max 12 steps)
-Three conflict blocks across imports, method body, and docstring.
-Developer A added custom exceptions; Developer B added structured logging.
-Agent must merge both sets of changes consistently.
-Expected baseline score: 0.45–0.70
-
-### Task 3 — Hard (max 18 steps)
-Five architecturally dependent conflict blocks.
-Developer A migrated to SQLAlchemy ORM; Developer B added features using
-old raw sqlite3. Conflicts cannot be resolved independently — all five must
-be resolved consistently with the ORM approach.
-Expected baseline score: 0.20–0.45
-
-## Reward Design
-
-Rewards are dense and multi-component:
-- inspect: +0.02 (encourage information gathering)
-- resolve correct block: +0.15 exact, +0.08 good, +0.02 partial
-- resolve wrong block: -0.02 to -0.08
-- invalid action: -0.05 to -0.10
-- step penalty: -0.01 per step (encourages efficiency)
-- submit: full grader score minus unresolved block penalty plus efficiency bonus
-
-## API Endpoints
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| /reset | POST | Start new episode |
-| /step | POST | Execute one action |
-| /state | GET | Get episode state |
-| /tasks | GET | List all tasks |
-| /grader | POST | Score current state |
-| /baseline | POST | Run baseline agent |
-| /health | GET | Health check |
-
-## Setup
-
-### Local Development
-
-```bash
-git clone <repo-url>
-cd git_merge_env
-pip install -r server/requirements.txt
-uvicorn server.app:app --host 0.0.0.0 --port 7860
-```
-
-### Docker
-
-```bash
-docker build -f server/Dockerfile -t git_merge_env .
-docker run -p 7860:7860 -e OPENAI_API_KEY=your_key git_merge_env
-```
-
-### Baseline
-
-```bash
-export OPENAI_API_KEY=your_key
-export BASE_URL=http://localhost:7860
-python baseline.py
-```
-
-## Baseline Scores
-
-| Task | Score | Model |
-|------|-------|-------|
-| task1 | ~0.82 | gpt-4o-mini |
-| task2 | ~0.54 | gpt-4o-mini |
-| task3 | ~0.31 | gpt-4o-mini |
-
-## OpenEnv Compliance
-
-Passes `openenv validate`. Deployed on Hugging Face Spaces.
-Tagged with `openenv`.
-```
-
----
-
-## client.py
-
-```python
-"""
-GitMergeEnv client for programmatic access.
-"""
-import httpx
-from models import MergeAction, MergeObservation, StepResult, EpisodeState
-
-
-class GitMergeEnvClient:
-    """
-    Synchronous client for GitMergeEnv.
-
-    Usage:
-        client = GitMergeEnvClient(base_url="https://your-space.hf.space")
-        obs = client.reset(task_id="task1")
-        result = client.step(MergeAction(action_type="inspect", conflict_id=0))
-        state = client.state()
-    """
-
-    def __init__(self, base_url: str = "http://localhost:7860", timeout: float = 30.0):
-        self.base_url = base_url.rstrip("/")
-        self.timeout = timeout
-
-    def reset(self, task_id: str = "task1") -> MergeObservation:
-        with httpx.Client(timeout=self.timeout) as client:
-            response = client.post(f"{self.base_url}/reset?task_id={task_id}")
-            response.raise_for_status()
-            return MergeObservation(**response.json())
-
-    def step(self, action: MergeAction) -> StepResult:
-        with httpx.Client(timeout=self.timeout) as client:
-            response = client.post(
-                f"{self.base_url}/step",
-                json=action.model_dump(),
-            )
-            response.raise_for_status()
-            return StepResult(**response.json())
-
-    def state(self) -> EpisodeState:
-        with httpx.Client(timeout=self.timeout) as client:
-            response = client.get(f"{self.base_url}/state")
-            response.raise_for_status()
-            return EpisodeState(**response.json())
-
-    def tasks(self) -> list:
-        with httpx.Client(timeout=self.timeout) as client:
-            response = client.get(f"{self.base_url}/tasks")
-            response.raise_for_status()
-            return response.json()
-
-    def grader(self) -> dict:
-        with httpx.Client(timeout=self.timeout) as client:
-            response = client.post(f"{self.base_url}/grader")
-            response.raise_for_status()
-            return response.json()
-```
-
----
-
-## Critical Implementation Rules
-
-The agent writing this code must follow these rules without exception:
-
-**1. No LLM calls inside the environment.**
-The grader, reward function, and all environment logic must be pure Python.
-No calls to OpenAI, Anthropic, HuggingFace inference, or any external AI service
-inside `environment.py`, `grader.py`, or any task file.
-LLM calls exist only in `baseline.py`.
-
-**2. Determinism is absolute.**
-Same action on same state must always return same reward.
-No `random`, no `time.time()`, no `uuid4()` inside step() or grader().
-Episode IDs use uuid4 only in reset() for tracking, not for scoring.
-
-**3. The environment never crashes on agent input.**
-Every possible action — malformed, empty, wrong type, out of range —
-must be handled gracefully inside step() and return a valid StepResult
-with HTTP 200. The safety net in app.py is the last resort, not the primary handler.
-
-**4. All scores are floats in [0.0, 1.0].**
-Clamp with `min(max(score, 0.0), 1.0)` at every grader return point.
-Never return negative scores from the grader.
-
-**5. Ground truth is never exposed.**
-The ground_truth_file and ground_truth_blocks fields from task dicts
-must never appear in any API response. The observation shows current_file_preview
-which is the agent's working version, never the ground truth.
-
-**6. The Dockerfile must build with no network access after pip install.**
-All dependencies are in requirements.txt. No runtime pip installs.
-No wget or curl during container startup.
-
-**7. The /baseline endpoint must not time out.**
-If OPENAI_API_KEY is not set, return a 400 error immediately.
-Do not attempt to call the OpenAI API without a key.
-
-**8. Port 7860 is mandatory.**
-Hugging Face Spaces runs on port 7860. The server must bind to 0.0.0.0:7860.
-Do not hardcode any other port as the default.
-
----
-
-## Validation Checklist
-
-Before declaring the build complete, verify every item:
-
-- [ ] `docker build -f server/Dockerfile -t git_merge_env .` exits with code 0
-- [ ] `docker run -p 7860:7860 git_merge_env` starts without error
-- [ ] `GET /health` returns HTTP 200
-- [ ] `POST /reset?task_id=task1` returns valid MergeObservation
-- [ ] `POST /reset?task_id=task2` returns valid MergeObservation
-- [ ] `POST /reset?task_id=task3` returns valid MergeObservation
-- [ ] `POST /step` with valid inspect action returns StepResult
-- [ ] `POST /step` with valid resolve action returns StepResult
-- [ ] `POST /step` with valid submit action returns StepResult with done=True
-- [ ] `POST /step` with completely invalid JSON body returns HTTP 422 (FastAPI validation)
-- [ ] `POST /step` with unknown action_type returns reward -0.10 and HTTP 200
-- [ ] `GET /state` returns EpisodeState
-- [ ] `GET /tasks` returns list of 3 TaskInfo objects
-- [ ] `POST /grader` returns GraderResult with score in [0.0, 1.0]
-- [ ] Grader returns 1.0 for perfect ground truth resolution of task1
-- [ ] Grader returns 0.0 for empty string input
-- [ ] Grader returns 0.0 for input that still contains conflict markers
-- [ ] `openenv validate` passes (run after installing openenv-core)
-- [ ] `python baseline.py` runs without error when OPENAI_API_KEY is set
-- [ ] `POST /baseline` returns BaselineResult with scores for all 3 tasks
-
----
-
-## What Success Looks Like
-
-A judge runs this sequence and every step works:
-
-```bash
-docker build -f server/Dockerfile -t git_merge_env .
-docker run -d -p 7860:7860 -e OPENAI_API_KEY=$KEY git_merge_env
-
-curl http://localhost:7860/health
-# {"status":"ok"}
-
-curl -X POST "http://localhost:7860/reset?task_id=task1"
-# {...valid MergeObservation...}
-
-curl -X POST http://localhost:7860/step \
-  -H "Content-Type: application/json" \
-  -d '{"action_type":"inspect","conflict_id":0}'
-# {...valid StepResult with reward 0.01 (0.02 - 0.01 step penalty)...}
-
-curl -X GET http://localhost:7860/tasks
-# [...list of 3 tasks with action schema...]
-
-curl -X POST http://localhost:7860/baseline
-# {task_scores: {task1: 0.82, task2: 0.54, task3: 0.31}, average_score: 0.557}
-```
-
-That's the bar. Build to it.
+### `GET /`
+Returns basic service metadata.
+
+### `GET /health`
+Simple health check.
+
+### `POST /reset?task_id=task1|task2|task3`
+Starts a fresh episode and returns `MergeObservation`.
+
+### `POST /step`
+Accepts `MergeAction`, returns `StepResult`.
+
+### `GET /state`
+Returns `EpisodeState`.
+
+### `GET /tasks`
+Returns task metadata plus action schema.
+
+### `POST /grader`
+Grades the current in-memory file without ending the episode.
+
+### `POST /validate`
+Runs deterministic self-checks on the grader using:
+- perfect input
+- empty input
+- unresolved conflicted input
+
+This endpoint should return `validation_passed: true`.
+
+### `POST /baseline`
+Imports `run_baseline()` from `inference.py` and runs the baseline agent against
+all three tasks.
+
+Credential validation in `/baseline` currently accepts:
+- `HF_TOKEN`
+- `API_KEY`
+- `NVIDIA_API_KEY`
+
+## 8. Models and Schema
+
+File: `models.py`
+
+Core models:
+- `MergeAction`
+- `MergeObservation`
+- `MergeReward`
+- `StepResult`
+- `EpisodeState`
+- `TaskInfo`
+- `GraderResult`
+- `BaselineResult`
+
+Important current details:
+
+1. `StepResult.reward` is a simple `float`, not a MergeReward object.
+
+2. `MergeObservation` includes these fields (per spec):
+   - `file_name: str`
+   - `total_conflicts: int`
+   - `resolved_conflicts: int`
+   - `unresolved_conflict_ids: List[int]`
+   - `current_file_preview: str`
+   - `last_action_feedback: str`
+   - `last_reward: float`
+   - `steps_remaining: int`
+   
+   Note: The `hint` field was removed to match the original spec.
+
+3. `BaselineResult` has:
+   - `model_config = {"protected_namespaces": ()}`
+
+   This suppresses the Pydantic protected namespace warning for `model_used`.
+
+## 9. Environment State Machine
+
+File: `server/environment.py`
+
+Class: `GitMergeEnvironment`
+
+Important state fields:
+- `episode_id`
+- `task_id`
+- `task`
+- `step_count`
+- `done`
+- `total_reward`
+- `current_file`
+- `original_file`
+- `ground_truth_file`
+- `ground_truth_blocks`
+- `resolutions`
+- `conflict_blocks`
+
+### 9.1 Reset behavior
+
+`reset(task_id)`:
+- validates the task id
+- clears all state
+- loads the task dict from `ALL_TASKS`
+- parses conflict blocks from the raw conflicted file
+- sets `current_file = original_file`
+
+### 9.2 Conflict parsing
+
+Conflict blocks are extracted with regex and stored as dicts containing:
+- `id`
+- `head_content`
+- `incoming_content`
+- `full_marker_text`
+- `start`
+- `end`
+
+### 9.3 Step behavior
+
+`step(action)` does this in order:
+
+1. rejects episode-already-done
+2. rejects no-active-episode
+3. increments `step_count`
+4. routes to:
+   - `_handle_inspect`
+   - `_handle_resolve`
+   - `_handle_submit`
+5. subtracts `STEP_PENALTY`
+6. updates `total_reward`
+7. terminates if step limit reached
+8. returns observation + reward + done + info
+
+`STEP_PENALTY = 0.01`
+
+This means the visible net reward is always action reward minus `0.01`.
+
+Examples:
+- inspect action reward `+0.02` becomes visible `+0.01`
+- perfect resolve `+0.15` becomes visible `+0.14`
+
+### 9.4 Inspect action
+
+`_handle_inspect()`:
+- requires `conflict_id`
+- checks range
+- returns HEAD and INCOMING block contents
+- includes current resolution if the block is already resolved
+- reward before step penalty: `+0.02`
+
+### 9.5 Resolve action
+
+`_handle_resolve()`:
+- requires `conflict_id`
+- requires non-empty resolution
+- checks id range
+- rejects suspiciously short resolutions
+- rejects conflict markers in submitted resolution
+- rejects unusually long resolutions
+- rejects duplicate identical re-resolution
+- grades the single block using `ConflictGrader.grade_block()`
+- stores the resolution
+- rebuilds the entire file via `_apply_resolutions()`
+
+Immediate block reward bands before step penalty:
+- `1.0` block score -> `+0.15`
+- `>= 0.7` -> `+0.08`
+- `>= 0.4` -> `+0.02`
+- `> 0.0` -> `-0.02`
+- `0.0` -> `-0.08`
+
+Validation edge cases currently implemented:
+- too short -> `resolution_too_short`
+- conflict markers -> `resolution_contains_markers`
+- too long -> `resolution_too_long`
+- duplicate identical resolution -> `duplicate_resolution`
+
+### 9.6 Submit action
+
+`_handle_submit()`:
+- runs the full deterministic grader
+- computes unresolved penalty
+- computes efficiency bonus
+- computes consistency bonus
+- returns terminal reward and component info
+
+Current terminal logic:
+- unresolved penalty = `0.10 * unresolved_count`
+- efficiency bonus = `0.05` only if:
+  - final score `>= 0.9`
+  - steps used `<= 50%` of max steps
+- consistency bonus comes from `_check_resolution_consistency()`
+
+### 9.7 Consistency bonus
+
+`_check_resolution_consistency()` is a shaped reward helper for multi-block tasks.
+
+It looks for mixed old/new patterns in all submitted resolutions:
+- `Session(engine)` vs `cursor.execute`
+- `CustomError` vs `ValueError`
+- `import logging` vs `print(`
+
+Current bonus rules:
+- no mixed pairs -> `+0.08`
+- one mixed pair -> `+0.03`
+- multiple mixed pairs -> `+0.00`
+
+### 9.8 Hint system
+
+`_build_observation()` adds a `hint` after the agent has consumed more than half
+its step budget and still has unresolved blocks.
+
+This is an observation-only helper and does not directly change scoring.
+
+## 10. Grader Internals
+
+File: `server/grader.py`
+
+Class: `ConflictGrader`
+
+This file must remain deterministic.
+
+### 10.1 Current grading pipeline
+
+`grade(agent_file, task)` currently works like this:
+
+1. Empty file:
+   - returns `0.0`
+   - sets only `parses_cleanly` and `no_conflict_markers`
+
+2. File still containing conflict markers:
+   - returns `0.0`
+   - markers are an immediate hard failure path
+
+3. File without markers but syntactically invalid:
+   - returns low/capped score based only on parse component
+
+4. Valid resolved Python file:
+   - computes weighted components
+   - applies forbidden-element penalty multiplicatively
+
+### 10.2 Components used today
+
+Weighted components (defined in task grader_weights):
+- `parses_cleanly`
+- `no_conflict_markers`
+- `block_match`
+- `required_elements`
+- `architectural_consistency` (task 3 only)
+
+Unweighted but applied multiplicatively:
+- `forbidden_penalty`
+
+Note: The `structural_similarity` component was removed to match the original spec.
+All task weights now allocate full weight to `block_match` instead of splitting
+between block_match and structural_similarity.
+
+### 10.3 Block matching
+
+Block scoring is not AST-based.
+It is token-presence scoring over each `ground_truth_block`.
+
+Current behavior:
+- collects significant tokens from each ground truth block
+- checks how many appear in the final agent file
+- averages that score across blocks
+
+### 10.4 Grade-block behavior
+
+`grade_block(agent_block, ground_truth_block)` is used for immediate resolve-step
+feedback inside the environment.
+
+Current implementation:
+- exact normalized match -> `1.0`
+- otherwise Jaccard token overlap scaled by `0.9`
+
+So a "pretty good" block can score around `0.7` to `0.9`.
+
+### 10.5 Forbidden penalty
+
+`_compute_forbidden_penalty()` reduces the score multiplier by `0.15` for each
+forbidden element found, with a floor of `0.10`.
+
+This is multiplicative, not additive.
+
+## 11. Task Canon
+
+The tasks are hardcoded dictionaries in `server/tasks/`.
+These are benchmark artifacts, not generated data.
+
+### 11.1 Task 1
+
+File: `server/tasks/task1.py`
+
+Summary:
+- file: `processor.py`
+- max steps: `6`
+- conflicts: `1`
+- difficulty: easy
+
+Intent:
+- Developer A renamed `user_data` -> `user_info`
+- Developer B added `timeout=30`
+- correct merge keeps both
+
+Common failure modes:
+- preserving the old variable name in `transform(...)`
+- dropping the timeout parameter
+
+### 11.2 Task 2
+
+File: `server/tasks/task2.py`
+
+Summary:
+- file: `data_service.py`
+- max steps: `12`
+- conflicts: `3`
+- difficulty: medium
+
+Current actual block order in the file:
+0. imports
+1. class docstring
+2. method body
+
+This order matters. Do not assume an older prose description that says the method
+body is block 1 and the docstring is block 2. The code is the truth.
+
+Intent:
+- merge custom exception usage with structured logging
+- preserve valid Python class/docstring structure
+
+Critical failure mode:
+- agents often merge semantics correctly but break syntax by:
+  - turning the docstring into plain prose without triple quotes
+  - losing indentation under `class DataService:`
+  - losing indentation under `if not record:`
+
+This task is where syntax preservation matters most.
+
+### 11.3 Task 3
+
+File: `server/tasks/task3.py`
+
+Summary:
+- file: `db_access.py`
+- max steps: `18`
+- conflicts: `5`
+- difficulty: hard
+
+This task is architecturally dependent across all blocks.
+
+Current actual scenario:
+- ORM migration wins
+- raw sqlite path must be fully removed
+- the file includes:
+  - `datetime`
+  - `DateTime`
+  - `deleted_at`
+  - `create_users(users: list[dict])`
+  - soft delete using `deleted_at = datetime.utcnow()`
+
+Important note:
+- older specs for this repo described a different task 3 with `create_user(...)`
+  and hard delete semantics
+- that is no longer the current benchmark
+- the actual task file in the repo is the source of truth
+
+Common failure modes:
+- mixing `Session(engine)` with `cursor.execute`
+- carrying over `sqlite3.connect`
+- breaking consistency across blocks
+- partially resolving blocks independently instead of choosing the ORM path globally
+
+## 12. Current Grader Weights
+
+These live in the task dicts and must sum correctly.
+
+### Task 1
+- parses_cleanly: `0.15`
+- no_conflict_markers: `0.10`
+- block_match: `0.40`
+- required_elements: `0.25`
+- structural_similarity: `0.10`
+
+### Task 2
+- parses_cleanly: `0.10`
+- no_conflict_markers: `0.10`
+- block_match: `0.40`
+- required_elements: `0.30`
+- structural_similarity: `0.10`
+
+### Task 3
+- parses_cleanly: `0.05`
+- no_conflict_markers: `0.10`
+- block_match: `0.35`
+- required_elements: `0.25`
+- architectural_consistency: `0.15`
+- structural_similarity: `0.10`
+
+## 13. Baseline Inference Agent
+
+File: `inference.py`
+
+This script is both:
+- the baseline runner
+- the easiest way to debug model behavior against the environment
+
+### 13.1 Provider behavior
+
+The script uses the OpenAI Python client against an OpenAI-compatible endpoint.
+
+Supported paths:
+- Hugging Face router
+- NVIDIA NIM
+
+### 13.2 Model name normalization
+
+Current normalization:
+- `meta/llama-3_3-70b-instruct` -> `meta/llama-3.3-70b-instruct`
+
+This exists because NIM returns `404 page not found` for the underscore variant.
+
+### 13.3 NIM-specific behavior
+
+If `API_BASE_URL` contains `integrate.api.nvidia.com`, the script:
+- treats the provider as NVIDIA NIM
+- uses `stream=True`
+- uses:
+  - `temperature=0.2`
+  - `top_p=0.7`
+  - `max_tokens=1024`
+
+Otherwise it uses the non-streaming HF-compatible call with:
+- `temperature=0.0`
+- `max_tokens=500`
+
+### 13.4 Retry and fallback
+
+`_create_completion_text()` retries rate limits up to 3 attempts with short backoff.
+
+If model generation still fails inside `run_task()`:
+- the step falls back to:
+  - `{"action_type": "inspect", "conflict_id": 0}`
+
+If an entire task run crashes:
+- `run_baseline()` catches it
+- records score `0.0`
+- continues to remaining tasks
+
+### 13.5 Action parsing
+
+The script is defensive about messy model output:
+- strips `<think>...</think>`
+- strips markdown fences
+- attempts JSON parse
+- falls back to regex extraction for malformed JSON
+- handles multiline `resolution` payloads
+
+### 13.6 Resolution normalization
+
+This is a critical current feature.
+
+Before sending a `resolve` action to the environment, the script normalizes the
+resolution using the context captured from an earlier `inspect`.
+
+It currently repairs:
+- block indentation
+- docstring blocks that lost triple quotes
+
+This was added because models, especially on task 2, frequently:
+- output prose instead of a real docstring
+- lose indentation inside class and `if` blocks
+- produce semantically good but syntactically invalid Python
+
+### 13.7 Pre-submit guard
+
+If all conflicts are resolved, the script does not blindly submit.
+
+It first:
+1. parses `current_file_preview` with `ast.parse`
+2. calls `/grader`
+
+If parse fails:
+- it prints `Parse error: ...`
+- forces an inspect on the weakest block instead of submitting
+
+If parse succeeds but the pre-submit grader score is still low:
+- it also forces additional inspection instead of submitting
+
+This guard exists to avoid ending runs with an obviously broken file.
+
+### 13.8 Current terminal output policy
+
+The user requested simplified logging.
+The script currently prints:
+- task headers
+- step action summary
+- reward / resolved count
+- `Block score: ...` when available
+- `Parse error: ...` when relevant
+- final grader scores
+
+It intentionally does not dump full raw model outputs or giant JSON traces anymore.
+
+## 14. Deployment and Containers
+
+### 14.1 Root `Dockerfile`
+
+This is the main deployable Dockerfile.
+
+It:
+- installs Python deps from `server/requirements.txt`
+- copies root `app.py`, `models.py`, `inference.py`, and `server/`
+- exposes port `7860`
+- runs:
+  - `uvicorn app:app --host 0.0.0.0 --port 7860 --workers 1`
+
+### 14.2 `server/Dockerfile`
+
+This is a server-scoped variant.
+
+It runs:
+- `uvicorn server.app:app --host 0.0.0.0 --port 7860 --workers 1`
+
+### 14.3 Root app shim
+
+The root Dockerfile relies on the root `app.py` shim.
+Do not remove that file unless you also change the container entrypoint.
+
+## 15. Dependencies
+
+The current repo is not using the older pinned versions from the original spec.
+The actual current versions are the ones in:
+- `pyproject.toml`
+- `server/requirements.txt`
+
+Current notable versions:
+- `fastapi==0.115.12`
+- `uvicorn[standard]==0.30.6`
+- `pydantic==2.8.2`
+- `openenv-core==0.2.1`
+- `python-dotenv==1.0.1`
+- `httpx==0.28.1`
+- `openai==2.7.2`
+
+If you update these, update both files consistently.
+
+## 16. Known Spec Drift and Current Truth
+
+There has been drift between old instructions, older hackathon specs, README text,
+and the current running code.
+
+Important examples:
+
+1. The repo uses `inference.py` for the baseline agent runner.
+
+2. The old task 3 spec described a different scenario.
+   Current task 3 uses:
+   - `create_users(...)`
+   - soft delete via `deleted_at`
+   - `datetime.utcnow()`
+
+3. `MergeObservation` now has a `hint` field.
+   `openenv.yaml` and some documentation still describe the older observation shape.
+
+4. README reward descriptions are conceptual.
+   The actual visible step rewards include the `-0.01` step penalty.
+
+When in doubt:
+- runtime code beats stale prose
+- task files beat older written summaries
+- FastAPI response models beat older spec comments
+
+## 17. Known Failure Modes
+
+These are the mistakes future agents should expect to see.
+
+### 17.1 Task 2 syntax corruption
+
+Most common:
+- docstring turned into plain text
+- indentation lost under class body
+- indentation lost under `if not record:`
+
+The grader is not wrong when these score `0.0`; the file genuinely does not parse.
+
+### 17.2 Task 3 architectural mixing
+
+Common bad resolution:
+- preserving some ORM blocks
+- keeping some raw SQL blocks
+
+This usually harms:
+- `required_elements`
+- `architectural_consistency`
+- `forbidden_penalty`
+
+### 17.3 NIM rate limits
+
+NVIDIA NIM can return `429 Too Many Requests`.
+Current mitigation:
+- short retry/backoff in `inference.py`
+- fallback inspect if calls still fail
+
+### 17.4 Wrong NIM model identifier
+
+Bad:
+- `meta/llama-3_3-70b-instruct`
+
+Good:
+- `meta/llama-3.3-70b-instruct`
+
+## 18. Local Development Workflow
+
+Typical workflow:
+
+1. Start server
+   - `uvicorn server.app:app --host 0.0.0.0 --port 7860`
+
+2. Validate grader
+   - `POST /validate`
+
+3. Run baseline locally
+   - `python inference.py`
+
+4. If HF limits are a problem, switch only the inference path to NVIDIA NIM
+
+Useful checks:
+- `/health`
+- `/tasks`
+- `/reset?task_id=task1`
+- `/grader`
+- `/validate`
+
+There is no formal pytest suite in the repo right now; `/validate` is the main
+built-in correctness smoke test for the grader.
+
+## 19. Modification Rules for Future Agents
+
+If you are asked to change the code:
+
+### Safe changes
+- documentation updates
+- inference prompt/agent behavior
+- local developer ergonomics
+- endpoint docs
+- deployment wiring
+- debug output changes
+- baseline-runner improvements that do not break the HF judge path
+
+### High-risk changes
+- task dict contents
+- grader formulas
+- reward shaping
+- observation schema
+- endpoint response models
+- Docker entrypoints
+
+If you change any of the high-risk areas, verify all of these:
+- `/validate` still passes
+- `/reset`, `/step`, `/state`, `/tasks`, `/grader`, `/baseline` still work
+- root Dockerfile still starts the app
+- judge-facing HF environment-variable flow still works
+
+## 20. If You Need to Touch Specific Files
+
+### `server/tasks/*.py`
+Only change if the user explicitly wants benchmark/task edits.
+Otherwise treat as locked benchmark data.
+
+### `server/grader.py`
+Keep deterministic.
+If you add a new weighted component:
+- update each task's `grader_weights`
+- keep weights coherent
+- keep `/validate` expectations realistic
+
+### `server/environment.py`
+Keep reward shaping understandable.
+Do not make invalid actions crash the API.
+
+### `models.py`
+If schema changes:
+- update FastAPI response models
+- update docs
+- update `openenv.yaml` if needed
+
+### `inference.py`
+Remember there are two audiences:
+- judges: Hugging Face router
+- developers: local debugging and NIM
+
+Do not reintroduce complicated provider branching that breaks the simple judge path.
+
+### `Dockerfile` and `app.py`
+These support root-level deploy/run compatibility.
+Do not remove them casually.
+
+## 21. Minimal Mental Model for New Agents
+
+If you only remember a few things, remember these:
+
+1. Tasks are hardcoded benchmark artifacts.
+2. Environment and grader must stay deterministic.
+3. Task 2 fails mostly because of syntax preservation mistakes.
+4. Task 3 fails mostly because of cross-block architectural inconsistency.
+5. `inference.py` is the non-deterministic baseline agent and local debug harness.
+6. Hugging Face is the production path; NVIDIA NIM is dev-only support.
+7. Root `app.py` and root `Dockerfile` are intentional compatibility layers.
+
+## 22. Source of Truth Order
+
+If documents disagree, trust them in this order:
+
+1. current Python runtime files
+2. task dicts in `server/tasks/`
+3. FastAPI models and endpoint code
+4. Dockerfiles
+5. README / openenv.yaml / older prose docs
+
+This file exists to reduce that drift, but the code still wins.

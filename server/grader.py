@@ -38,11 +38,13 @@ class ConflictGrader:
             return 0.0, components
 
         parses = self._parses_cleanly(agent_file)
-        components["parses_cleanly"] = 1.0 if parses else 0.0
-
         if not parses:
-            total = weights.get("parses_cleanly", 0.15) * components["parses_cleanly"]
-            return round(min(total, 0.15), 4), components
+            components["parses_cleanly"] = 0.0
+            parse_penalty = 0.5
+            print(f"[grader debug] Parse failed — applying 0.5 penalty multiplier")
+        else:
+            components["parses_cleanly"] = 1.0
+            parse_penalty = 1.0
 
         components["no_conflict_markers"] = 1.0
 
@@ -52,18 +54,19 @@ class ConflictGrader:
         req_score = self._score_required_elements(agent_file, task)
         components["required_elements"] = round(req_score, 4)
 
+        indent_score = self._score_indentation_consistency(
+            agent_file,
+            task["ground_truth_file"],
+        )
+        components["indentation_consistency"] = indent_score
+
         if "consistency_checks" in task:
             consistency_score = self._score_consistency(agent_file, task)
             components["architectural_consistency"] = round(consistency_score, 4)
         elif "architectural_consistency" in weights:
             components["architectural_consistency"] = 1.0
 
-        structural_score = self._score_structural_similarity(
-            agent_file,
-            task["ground_truth_file"],
-        )
-        components["structural_similarity"] = structural_score
-
+        # Forbidden elements penalty — applied multiplicatively
         forbidden_penalty = self._compute_forbidden_penalty(agent_file, task)
         components["forbidden_penalty"] = round(forbidden_penalty, 4)
 
@@ -72,38 +75,42 @@ class ConflictGrader:
             component_score = components.get(component_name, 0.0)
             total += weight * component_score
 
+        # Apply parse penalty (1.0 if clean, 0.5 if broken)
+        total = total * parse_penalty
+
         total = total * forbidden_penalty
+
+        # A terminal score of exactly 0.0 for a nearly-correct file looks like
+        # a broken grader. Keep a small floor for non-empty, marker-free files.
+        total = max(total, 0.04)
 
         return round(min(max(total, 0.0), 1.0), 4), components
 
-    def grade_block(self, agent_block: str, ground_truth_block: str) -> float:
+    def grade_block(self, agent: str, truth: str) -> float:
         """
         Score a single resolved block against ground truth.
         Used for immediate per-step feedback inside step().
-
-        Returns:
-          1.0  — exact match (whitespace normalized)
-          0.5-0.9 — high token overlap (good but not perfect)
-          0.1-0.49 — partial token overlap
-          0.0  — no meaningful overlap
         """
-        agent_normalized = self._normalize_whitespace(agent_block)
-        truth_normalized = self._normalize_whitespace(ground_truth_block)
+        agent_normalized = self._normalize_whitespace(agent)
+        truth_normalized = self._normalize_whitespace(truth)
 
         if agent_normalized == truth_normalized:
             return 1.0
 
-        agent_tokens = set(re.findall(r"\w+|[^\w\s]", agent_normalized))
-        truth_tokens = set(re.findall(r"\w+|[^\w\s]", truth_normalized))
+        agent_lines = set(l.strip() for l in agent_normalized.splitlines() if l.strip())
+        truth_lines = set(l.strip() for l in truth_normalized.splitlines() if l.strip())
 
-        if not truth_tokens:
+        if not truth_lines:
             return 0.0
 
-        intersection = agent_tokens & truth_tokens
-        union = agent_tokens | truth_tokens
-        jaccard = len(intersection) / len(union)
+        precision = len(agent_lines & truth_lines) / len(agent_lines) if agent_lines else 0.0
+        recall = len(agent_lines & truth_lines) / len(truth_lines)
 
-        return round(jaccard * 0.6, 4)
+        if precision + recall == 0:
+            return 0.0
+
+        f1 = 2 * precision * recall / (precision + recall)
+        return round(min(f1 * 0.85, 0.85), 4)
 
     def _parses_cleanly(self, code: str) -> bool:
         """Returns True if the code parses as valid Python."""
@@ -196,31 +203,37 @@ class ConflictGrader:
 
         return score / total_weight if total_weight > 0 else 1.0
 
-    def _score_structural_similarity(self, agent_file: str, ground_truth_file: str) -> float:
+    def _score_indentation_consistency(self, agent_file: str, ground_truth_file: str) -> float:
         """
-        Check if agent preserves the same function/class definitions as ground truth.
-        Uses regex to extract def and class signatures and compares them.
-        A resolution that changes function names or removes classes scores poorly.
+        Check whether indentation levels used by the agent broadly match the
+        ground truth. This catches structurally bad merges that preserve tokens
+        but break Python block layout.
         """
 
-        def extract_signatures(code: str) -> set:
-            pattern = re.compile(r"^\s*(?:def|class)\s+\w+[^:]*:", re.MULTILINE)
-            return {match.group().strip() for match in pattern.finditer(code)}
+        def get_indent_signature(code: str) -> list[int]:
+            lines = code.splitlines()
+            return [len(line) - len(line.lstrip()) for line in lines if line.strip()]
 
-        agent_sigs = extract_signatures(agent_file)
-        truth_sigs = extract_signatures(ground_truth_file)
+        agent_indents = get_indent_signature(agent_file)
+        truth_indents = get_indent_signature(ground_truth_file)
 
-        if not truth_sigs:
+        if not truth_indents:
             return 1.0
 
-        preserved = agent_sigs & truth_sigs
-        return round(len(preserved) / len(truth_sigs), 4)
+        agent_set = set(agent_indents)
+        truth_set = set(truth_indents)
+
+        if not truth_set:
+            return 1.0
+
+        overlap = len(agent_set & truth_set) / len(truth_set)
+        return round(overlap, 4)
 
     def _compute_forbidden_penalty(self, agent_file: str, task: dict) -> float:
         """
         Multiplicative penalty for forbidden elements.
         Each forbidden element found reduces the multiplier by 0.15.
-        Minimum multiplier is 0.25 (never zero — there may still be partial credit).
+        Minimum multiplier is 0.1 (never zero — there may still be partial credit).
 
         Note: conflict markers are handled by no_conflict_markers component,
         so they are included in forbidden to apply double penalty for failing
@@ -231,7 +244,9 @@ class ConflictGrader:
             return 1.0
 
         violations = sum(1 for element in forbidden if element in agent_file)
-        penalty_multiplier = max(1.0 - (violations * 0.15), 0.25)
+
+        # Each violation reduces by 0.15
+        penalty_multiplier = max(1.0 - (violations * 0.15), 0.10)
         return penalty_multiplier
 
     def _normalize_whitespace(self, text: str) -> str:
