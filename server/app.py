@@ -221,11 +221,8 @@ async def validate():
 @app.post("/baseline", response_model=BaselineResult, tags=["openenv"])
 async def baseline():
     try:
-        if not (os.getenv("HF_TOKEN") or os.getenv("API_KEY")):
-            raise HTTPException(
-                status_code=400,
-                detail="HF_TOKEN or API_KEY environment variable not set."
-            )
+        if not os.environ.get("API_KEY") and not os.environ.get("HF_TOKEN"):
+            raise HTTPException(status_code=400, detail="API_KEY environment variable not set")
 
         from inference import run_baseline
         scores = run_baseline()
