@@ -15,6 +15,8 @@ class ConflictGrader:
     CONFLICT_START = "<<<<<<<\n"
     CONFLICT_SEP = "======="
     CONFLICT_END = ">>>>>>>"
+    MIN_TERMINAL_SCORE = 0.01
+    MAX_TERMINAL_SCORE = 0.99
 
     def grade(self, agent_file: str, task: dict) -> Tuple[float, Dict]:
         """
@@ -29,14 +31,9 @@ class ConflictGrader:
         if not agent_file.strip():
             components["parses_cleanly"] = 0.0
             components["no_conflict_markers"] = 0.0
-            return 0.0, components
+            return self.MIN_TERMINAL_SCORE, components
 
         has_markers = self._has_conflict_markers(agent_file)
-        if has_markers:
-            components["parses_cleanly"] = 0.0 if not self._parses_cleanly(agent_file) else 1.0
-            components["no_conflict_markers"] = 0.0
-            return 0.0, components
-
         parses = self._parses_cleanly(agent_file)
         if not parses:
             components["parses_cleanly"] = 0.0
@@ -45,7 +42,7 @@ class ConflictGrader:
             components["parses_cleanly"] = 1.0
             parse_penalty = 1.0
 
-        components["no_conflict_markers"] = 1.0
+        components["no_conflict_markers"] = 0.0 if has_markers else 1.0
 
         block_score = self._score_blocks(agent_file, task)
         components["block_match"] = round(block_score, 4)
@@ -79,11 +76,8 @@ class ConflictGrader:
 
         total = total * forbidden_penalty
 
-        # A terminal score of exactly 0.0 for a nearly-correct file looks like
-        # a broken grader. Keep a small floor for non-empty, marker-free files.
-        total = max(total, 0.04)
-
-        return round(min(max(total, 0.0), 1.0), 4), components
+        total = min(max(total, self.MIN_TERMINAL_SCORE), self.MAX_TERMINAL_SCORE)
+        return round(total, 4), components
 
     def grade_block(self, agent: str, truth: str) -> float:
         """
