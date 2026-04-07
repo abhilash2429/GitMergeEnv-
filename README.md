@@ -101,7 +101,7 @@ Set these three variables:
 **Windows PowerShell:**
 ```powershell
 $env:API_BASE_URL = "https://router.huggingface.co/v1"
-$env:HF_TOKEN = "your_huggingface_token_here"
+$env:API_KEY = "your_huggingface_token_here"
 $env:MODEL_NAME = "Qwen/Qwen2.5-72B-Instruct"
 python inference.py
 ```
@@ -109,7 +109,7 @@ python inference.py
 **Linux/Mac:**
 ```bash
 export API_BASE_URL=https://router.huggingface.co/v1
-export HF_TOKEN=your_huggingface_token_here
+export API_KEY=your_huggingface_token_here
 export MODEL_NAME=Qwen/Qwen2.5-72B-Instruct
 python inference.py
 ```
@@ -126,20 +126,20 @@ uvicorn server.app:app --host 0.0.0.0 --port 7860 --reload
 ```bash
 # Windows PowerShell
 $env:API_BASE_URL = "https://router.huggingface.co/v1"
-$env:HF_TOKEN = "your_huggingface_token_here"
+$env:API_KEY = "your_huggingface_token_here"
 $env:MODEL_NAME = "Qwen/Qwen2.5-72B-Instruct"
 python inference.py
 
 # Linux/Mac
 export API_BASE_URL=https://router.huggingface.co/v1
-export HF_TOKEN=your_huggingface_token_here
+export API_KEY=your_huggingface_token_here
 export MODEL_NAME=Qwen/Qwen2.5-72B-Instruct
 python inference.py
 ```
 
 ## Baseline Scores
 
-Evaluated using `meta-llama/Llama-3.3-70B-Instruct` via HuggingFace router.
+Evaluated using `Qwen/Qwen2.5-72B-Instruct` via HuggingFace router.
 
 | Task | Score | Difficulty | Notes |
 |------|-------|------------|-------|

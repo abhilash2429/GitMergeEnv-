@@ -3,8 +3,8 @@ FROM python:3.11-slim
 WORKDIR /app
 
 ENV API_BASE_URL=https://router.huggingface.co/v1
-ENV MODEL_NAME=meta-llama/Llama-3.3-70B-Instruct
-ENV HF_TOKEN=""
+ENV API_KEY=""
+ENV MODEL_NAME=Qwen/Qwen2.5-72B-Instruct
 ENV BASE_URL=http://localhost:7860
 ENV PORT=7860
 

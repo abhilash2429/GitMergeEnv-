@@ -2,6 +2,7 @@ import os
 import re
 import json
 import time
+import sys
 import threading
 from openai import OpenAI
 
@@ -12,8 +13,8 @@ API_BASE_URL = os.environ["API_BASE_URL"]
 API_KEY = os.environ["API_KEY"]
 MODEL_NAME = os.environ.get("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
 
-print(f"[inference] Base URL: {API_BASE_URL}")
-print(f"[inference] Model: {MODEL_NAME}")
+print(f"[inference] Base URL: {API_BASE_URL}", file=sys.stderr, flush=True)
+print(f"[inference] Model: {MODEL_NAME}", file=sys.stderr, flush=True)
 
 client = OpenAI(
     base_url=API_BASE_URL,
@@ -70,7 +71,7 @@ def log_start(task: str, env: str, model: str) -> None:
 
 def log_step(step: int, action: str, reward: float, done: bool, error) -> None:
     """Emit a mandatory [STEP] line to stdout after every env.step() call."""
-    error_val = str(error) if error else "null"
+    error_val = str(error).replace("\n", " ") if error else "null"
     done_val = str(done).lower()
     print(
         f"[STEP] step={step} action={action} reward={reward:.2f} done={done_val} error={error_val}",
@@ -433,10 +434,11 @@ def run_task(client: OpenAI, task_id: str) -> float:
             done = result["done"]
 
             # Detect internal environment errors
-            error = None
+            info = result.get("info", {})
+            error = info.get("error")
             feedback = obs.get("last_action_feedback", "")
-            if feedback.startswith("Internal error processing action:"):
-                error = "internal_env_error"
+            if error is None and feedback.startswith("Internal error processing action:"):
+                error = feedback
 
             step_rewards.append(reward)
 
