@@ -1,45 +1,134 @@
-name: git_merge_env
-version: "0.1.0"
+name: GitMergeEnv
+version: "1.0.0"
 description: >
-  A real-world RL environment where an agent resolves git merge conflicts
-  in Python source files. The agent inspects conflict blocks, proposes
-  resolutions, and is scored deterministically against ground truth.
+  An RL environment where agents learn to resolve git merge conflicts with semantic
+  correctness — rewarded for architectural consistency across the whole file,
+  not just individual blocks.
+
 author: "abhilash2429"
-tags:
-  - openenv
-  - software-engineering
-  - git
-  - code-review
-  - real-world
+license: MIT
+
+environment:
+  type: text
+  deterministic: true
+  multi_step: true
+
+action_space:
+  type: object
+  fields:
+    action_type:
+      type: string
+      enum: [inspect, resolve, submit]
+      required: true
+    conflict_id:
+      type: integer
+      required: false
+      description: Required for inspect and resolve actions. 0-based index.
+    resolution:
+      type: string
+      required: false
+      description: Required for resolve actions. Must not contain conflict markers.
+
+observation_space:
+  type: object
+  fields:
+    file_name:
+      type: string
+    total_conflicts:
+      type: integer
+    resolved_conflicts:
+      type: integer
+    unresolved_conflict_ids:
+      type: array
+      items: integer
+    current_file_preview:
+      type: string
+    last_action_feedback:
+      type: string
+    last_reward:
+      type: float
+    steps_remaining:
+      type: integer
+
+reward:
+  type: float
+  range: [-1.0, 1.0]
+  terminal_range: [0.01, 0.99]
+  shaped: true
+  description: >
+    Multi-component reward with per-step penalty, immediate block-level signals,
+    repetition decay, terminal grader score, unresolved penalty, efficiency bonus,
+    and architectural consistency bonus.
+
 tasks:
   - id: task1
-    name: "Single Conflict — Variable Rename"
+    file: processor.py
     difficulty: easy
+    conflicts: 1
+    max_steps: 6
+    description: Variable rename + new argument. Must preserve both changes.
   - id: task2
-    name: "Three Conflicts — Class Refactor"
+    file: data_service.py
     difficulty: medium
+    conflicts: 3
+    max_steps: 12
+    description: CustomError migration + logging. Docstring and indentation traps.
   - id: task3
-    name: "Five Conflicts — Architectural Migration"
+    file: db_access.py
     difficulty: hard
-action_schema:
-  action_type:
-    type: string
-    enum: ["inspect", "resolve", "submit"]
-    required: true
-  conflict_id:
-    type: integer
-    required: false
-    description: "0-indexed conflict block ID. Required for inspect and resolve."
-  resolution:
-    type: string
-    required: false
-    description: "The resolved content for the conflict block. Required for resolve."
-observation_schema:
-  file_name: string
-  total_conflicts: integer
-  resolved_conflicts: integer
-  unresolved_conflict_ids: array
-  current_file_preview: string
-  last_action_feedback: string
-  last_reward: float
-  steps_remaining: integer
+    conflicts: 5
+    max_steps: 18
+    description: SQLAlchemy ORM vs raw sqlite3. ORM must win globally across all blocks.
+
+endpoints:
+  - method: GET
+    path: /tasks
+    description: List all available tasks
+  - method: POST
+    path: /reset
+    description: Initialize a new episode for a given task_id
+  - method: POST
+    path: /step
+    description: Submit an action and receive observation, reward, done, info
+  - method: GET
+    path: /state
+    description: Get current episode state metadata
+  - method: POST
+    path: /grader
+    description: Run deterministic grader on an agent-submitted file
+  - method: POST
+    path: /validate
+    description: Validate environment schema compliance
+  - method: POST
+    path: /baseline
+    description: Run LLM baseline agent across all three tasks
+  - method: GET
+    path: /health
+    description: Health check
+
+grader:
+  type: deterministic
+  llm_based: false
+  components:
+    - no_conflict_markers
+    - block_match
+    - required_elements
+    - architectural_consistency
+    - indentation_consistency
+    - forbidden_penalty
+  score_range: [0.01, 0.99]
+  notes: >
+    Scores are clamped to strict open interval (0.01, 0.99).
+    grade_block non-exact matches are capped at 0.85.
+    All grading is programmatic with no randomness.
+
+baseline:
+  file: inference.py
+  model_default: Qwen/Qwen2.5-72B-Instruct
+  model_env_var: MODEL_NAME
+  api_env_var: API_KEY
+  base_url_env_var: API_BASE_URL
+  stdout_format: structured
+  description: >
+    Chain-of-thought baseline with conflict-aware repair heuristics,
+    sliding message window, and rate-limit retry logic.
