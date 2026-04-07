@@ -2,20 +2,23 @@ import os
 import re
 import json
 import time
-import sys
+import threading
 from openai import OpenAI
 
 # -------------------------------------------------------
-# Credentials — judges set these three variables
+# Judge-injected credentials — do NOT add defaults here
 # -------------------------------------------------------
-API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
-API_KEY = os.getenv("API_KEY") or os.getenv("HF_TOKEN")
-MODEL_NAME = os.getenv("MODEL_NAME", "meta-llama/Llama-3.3-70B-Instruct")
+API_BASE_URL = os.environ["API_BASE_URL"]
+API_KEY = os.environ["API_KEY"]
+MODEL_NAME = os.environ.get("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
 
-# NOTE: Key validation and client creation are deferred to run_baseline()
-# so importing this module is 100% side-effect free.
-# The /baseline endpoint does `from inference import run_baseline` and must
-# not crash or block even when no API key is set.
+print(f"[inference] Base URL: {API_BASE_URL}")
+print(f"[inference] Model: {MODEL_NAME}")
+
+client = OpenAI(
+    base_url=API_BASE_URL,
+    api_key=API_KEY,
+)
 
 BASE_URL = os.getenv("BASE_URL", "http://localhost:7860")
 MAX_STEPS_OVERRIDE = 20
@@ -532,28 +535,10 @@ def run_baseline() -> dict:
     Run the baseline agent against all 3 tasks.
     Returns {task_id: score}.
     """
-    # Validate credentials here — not at import time
-    if not API_KEY:
-        raise ValueError(
-            "HF_TOKEN environment variable must be set. "
-            "Get your token at https://huggingface.co/settings/tokens"
-        )
-
-    print(f"[inference] Base URL: {API_BASE_URL}", file=sys.stderr, flush=True)
-    print(f"[inference] Model:    {MODEL_NAME}", file=sys.stderr, flush=True)
-
-    # Build the OpenAI client once, pass it to each task run
-    _client = OpenAI(
-        base_url=API_BASE_URL,
-        api_key=API_KEY,
-        timeout=30.0,
-        max_retries=2,
-    )
-
     scores = {}
     for task_id in ["task1", "task2", "task3"]:
         try:
-            score = run_task(_client, task_id)
+            score = run_task(client, task_id)
         except Exception as exc:
             print(
                 f"[inference] Task {task_id} failed entirely: {exc}. Recording 0.0",
@@ -577,9 +562,9 @@ def run_baseline() -> dict:
 
 if __name__ == "__main__":
     # 19-minute hard limit (infra requirement: runtime < 20 min)
-    import threading
-
     def _timeout_handler():
+        import sys
+
         print("\n[inference] 19-minute time limit reached. Stopping.", file=sys.stderr, flush=True)
         sys.exit(1)
 
