@@ -1507,9 +1507,6 @@ python inference.py
 curl -X POST localhost:7860/baseline</div>
             </div>
         </div>
-        <div class="callout reveal" style="margin-top: 1.5rem;">
-            Judges inject <code>API_BASE_URL</code>, <code>API_KEY</code>, and <code>MODEL_NAME</code> directly. The inference script uses these variables with no hardcoded fallbacks.
-        </div>
     </div>
 </section>
 
@@ -1765,8 +1762,15 @@ async def validate():
 @app.post("/baseline", response_model=BaselineResult, tags=["openenv"])
 async def baseline():
     try:
-        if not os.environ.get("API_KEY"):
-            raise HTTPException(status_code=400, detail="API_KEY environment variable not set")
+        missing_vars = [
+            env_name for env_name in ("API_BASE_URL", "API_KEY")
+            if not os.environ.get(env_name)
+        ]
+        if missing_vars:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Missing environment variables: {', '.join(missing_vars)}",
+            )
 
         from inference import run_baseline
         scores = run_baseline()

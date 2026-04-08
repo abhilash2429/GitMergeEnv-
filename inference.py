@@ -411,6 +411,7 @@ def run_task(client: OpenAI, task_id: str) -> float:
                 obs.get("resolved_conflicts") == obs.get("total_conflicts")
                 and obs.get("total_conflicts", 0) > 0
                 and action.get("action_type") != "submit"
+                and not forced_review_active
             ):
                 print(
                     f"[inference] Step {step_idx}: All blocks resolved — forcing submit",

@@ -24,6 +24,8 @@ class GitMergeEnvironment:
     """
 
     STEP_PENALTY = 0.01
+    MIN_REWARD = -1.0
+    MAX_REWARD = 1.0
 
     def __init__(self):
         self._reset_state()
@@ -132,6 +134,7 @@ class GitMergeEnvironment:
             info = {"error": "invalid_action_type"}
 
         reward -= self.STEP_PENALTY
+        reward = max(self.MIN_REWARD, min(self.MAX_REWARD, reward))
         self.total_reward += reward
 
         if steps_remaining <= 0 and not self.done:
@@ -303,7 +306,8 @@ class GitMergeEnvironment:
 
         consistency_bonus = self._check_resolution_consistency()
 
-        terminal_reward = final_score - unresolved_penalty + efficiency_bonus + consistency_bonus
+        raw_terminal_reward = final_score - unresolved_penalty + efficiency_bonus + consistency_bonus
+        terminal_reward = max(self.MIN_REWARD, min(self.MAX_REWARD, raw_terminal_reward))
 
         if not grader._parses_cleanly(self.current_file):
             score_explanation = (
@@ -324,7 +328,7 @@ class GitMergeEnvironment:
             f"Unresolved penalty: -{unresolved_penalty:.2f}. "
             f"Efficiency bonus: +{efficiency_bonus:.2f}. "
             f"Consistency bonus: +{consistency_bonus:.2f}. "
-            f"Terminal reward: {terminal_reward:.4f}. "
+            f"Terminal reward before step penalty: {terminal_reward:.4f}. "
             f"Components: {components}."
         )
 
@@ -342,7 +346,7 @@ class GitMergeEnvironment:
         Detects cases where agent mixed old and new patterns across blocks.
         Returns 0.0 to 0.10 bonus.
         """
-        if len(self.resolutions) < 2:
+        if len(self.resolutions) < 2 or len(self.resolutions) != len(self.conflict_blocks):
             return 0.0
 
         all_resolved = "\n".join(self.resolutions.values())
@@ -392,13 +396,27 @@ class GitMergeEnvironment:
         Rebuild the file with all current resolutions applied.
         Unresolved blocks remain as conflict markers.
         """
-        result = self.original_file
-        for block_id in sorted(self.resolutions.keys(), reverse=True):
-            if block_id < len(self.conflict_blocks):
-                block = self.conflict_blocks[block_id]
-                resolution = self.resolutions[block_id]
-                result = result.replace(block["full_marker_text"], resolution + "\n", 1)
-        return result
+        if not self.conflict_blocks:
+            return self.original_file
+
+        pieces = []
+        cursor = 0
+
+        for block in self.conflict_blocks:
+            pieces.append(self.original_file[cursor:block["start"]])
+
+            resolution = self.resolutions.get(block["id"])
+            if resolution is None:
+                pieces.append(block["full_marker_text"])
+            else:
+                pieces.append(resolution)
+                if not resolution.endswith("\n"):
+                    pieces.append("\n")
+
+            cursor = block["end"]
+
+        pieces.append(self.original_file[cursor:])
+        return "".join(pieces)
 
     def _build_observation(
         self,
