@@ -423,13 +423,3 @@ curl -X POST "https://abhilash2429-gitmergeenv.hf.space/reset?task_id=task1"
 | Curriculum structure | Tasks increase difficulty in a meaningful way |
 | Whole-file coherence | Rewards architectural consistency, not only local patch quality |
 
-## Notes
-
-Recent fixes in the current codebase include:
-
-| Fix | Reason |
-|---|---|
-| Position-safe resolution application | Avoids incorrect replacement if conflict text repeats |
-| Consistency bonus only after full resolution | Prevents partial submissions from receiving bonus credit |
-| Baseline env var validation for both `API_BASE_URL` and `API_KEY` | Makes `/baseline` fail clearly when configuration is incomplete |
-| Pre-submit review guard in baseline runner | Prevents review mode from being overridden immediately by forced submit |
